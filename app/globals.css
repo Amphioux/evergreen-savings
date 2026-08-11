@@ -1,0 +1,24 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: light;
+  --background: #f8fafc;
+  --foreground: #0f172a;
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+  min-height: 100vh;
+}
+
+/* Force light background & dark text on inputs to prevent OS dark mode conflicts */
+input, select, textarea {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+}
+
+input::placeholder {
+  color: #94a3b8 !important;
+}

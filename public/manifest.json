@@ -1,0 +1,21 @@
+{
+  "name": "Evergreen Saving & Credit Group",
+  "short_name": "Evergreen",
+  "description": "Village Savings Ledger and Mini-Bank Application",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#064e3b",
+  "theme_color": "#064e3b",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
