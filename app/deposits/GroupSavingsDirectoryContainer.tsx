@@ -4,15 +4,16 @@ import { useState, useMemo } from 'react';
 import { formatMonthLabel, formatNptDateTime } from '@/lib/formatters';
 import DepositReceiptModal from './DepositReceiptModal';
 import EditDepositModal from './EditDepositModal';
+import MyDepositsLedger from './MyDepositsLedger';
 import { 
   Users, 
   Search, 
   Filter, 
   RotateCcw, 
-  PiggyBank, 
   Lock, 
   UserCheck, 
-  Printer 
+  Printer,
+  ArrowUpDown
 } from 'lucide-react';
 
 interface GroupSavingsDirectoryContainerProps {
@@ -35,6 +36,7 @@ export default function GroupSavingsDirectoryContainer({
 }: GroupSavingsDirectoryContainerProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedYear, setSelectedYear] = useState('');
+  const [sortOption, setSortOption] = useState('recorded_desc');
 
   // Extract available years dynamically from deposits
   const availableYears = useMemo(() => {
@@ -46,9 +48,9 @@ export default function GroupSavingsDirectoryContainer({
     return Array.from(yearsSet).sort((a, b) => b.localeCompare(a));
   }, [depositList]);
 
-  // Filter group deposits based on search term, representative name, and year
-  const filteredDeposits = useMemo(() => {
-    return depositList.filter((dep) => {
+  // Filter and Sort group deposits
+  const filteredAndSortedDeposits = useMemo(() => {
+    let filtered = depositList.filter((dep) => {
       const depIdStr = dep.id ? String(dep.id).padStart(4, '0') : '0000';
       const depositCode = (dep.deposit_code || `DP-${depIdStr}`).toLowerCase();
       const memberName = (dep.profiles?.full_name || '').toLowerCase();
@@ -59,6 +61,7 @@ export default function GroupSavingsDirectoryContainer({
 
       const query = searchTerm.toLowerCase().trim();
 
+      // 1. Search Filter
       if (
         query &&
         !memberName.includes(query) &&
@@ -70,27 +73,39 @@ export default function GroupSavingsDirectoryContainer({
         return false;
       }
 
+      // 2. Year Filter
       if (selectedYear && rawYear !== selectedYear) {
         return false;
       }
 
       return true;
     });
-  }, [depositList, searchTerm, selectedYear]);
+
+    // Sort Logic
+    filtered.sort((a, b) => {
+      if (sortOption.startsWith('recorded')) {
+        const dateA = new Date(a.created_at || a.for_month || 0).getTime();
+        const dateB = new Date(b.created_at || b.for_month || 0).getTime();
+        return sortOption === 'recorded_desc' ? dateB - dateA : dateA - dateB;
+      } else {
+        const valA = a.for_month || '';
+        const valB = b.for_month || '';
+        return sortOption === 'month_desc' ? valB.localeCompare(valA) : valA.localeCompare(valB);
+      }
+    });
+
+    return filtered;
+  }, [depositList, searchTerm, selectedYear, sortOption]);
 
   // Total Accumulated Savings calculated dynamically from filtered deposits
   const totalAccumulatedSavings = useMemo(() => {
-    return filteredDeposits.reduce((sum, d) => sum + Number(d.amount_paid || 0), 0);
-  }, [filteredDeposits]);
-
-  // Personal Savings Total
-  const myTotalSavings = useMemo(() => {
-    return myDeposits.reduce((sum, d) => sum + Number(d.amount_paid || 0), 0);
-  }, [myDeposits]);
+    return filteredAndSortedDeposits.reduce((sum, d) => sum + Number(d.amount_paid || 0), 0);
+  }, [filteredAndSortedDeposits]);
 
   function handleResetFilters() {
     setSearchTerm('');
     setSelectedYear('');
+    setSortOption('recorded_desc');
   }
 
   function handlePrintLedger() {
@@ -116,89 +131,7 @@ export default function GroupSavingsDirectoryContainer({
 
       {/* SECTION 1: MY PERSONAL SAVINGS LEDGER (Non-Admins Only) */}
       {!isAdmin && (
-        <div className="bg-white rounded-2xl border border-emerald-200 shadow-sm overflow-hidden print:hidden">
-          <div className="p-4 bg-emerald-900 text-white flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div className="flex items-center gap-2.5">
-              <div className="p-2 bg-emerald-800 rounded-lg">
-                <PiggyBank size={20} className="text-emerald-300" />
-              </div>
-              <div>
-                <h3 className="font-bold text-base">My Personal Savings Ledger</h3>
-                <p className="text-xs text-emerald-200">Your contribution history and printable receipt vouchers</p>
-              </div>
-            </div>
-
-            <div className="bg-emerald-800/80 border border-emerald-700 px-3.5 py-1.5 rounded-xl font-mono text-xs">
-              <span className="text-emerald-200 block text-[10px] font-sans font-semibold">Total Savings Accumulated</span>
-              <strong className="text-white text-base font-extrabold">NPR {myTotalSavings.toLocaleString('en-IN')}</strong>
-            </div>
-          </div>
-
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead className="bg-emerald-50/60 text-emerald-950 text-xs uppercase font-semibold border-b border-emerald-100">
-                <tr>
-                  <th className="p-3 font-mono">Deposit ID</th>
-                  <th className="p-3">Contribution Month</th>
-                  <th className="p-3 text-right">Amount Deposited</th>
-                  <th className="p-3">Recorded Time</th>
-                  <th className="p-3">Recorded By</th>
-                  <th className="p-3 text-right">Receipt Voucher</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-emerald-50">
-                {myDeposits.map((dep: any) => {
-                  const depIdStr = dep.id ? String(dep.id).padStart(4, '0') : '0000';
-                  const deposit_code = dep.deposit_code || `DP-${depIdStr}`;
-                  const rawMonth = dep.for_month?.slice(0, 7);
-                  const cleanName = cleanRecordedName(dep.recorded_by_name);
-
-                  return (
-                    <tr key={dep.id || deposit_code} className="hover:bg-emerald-50/40 transition-colors">
-                      <td className="p-3 font-mono font-bold text-emerald-900 text-xs">{deposit_code}</td>
-                      <td className="p-3 font-bold text-slate-800">
-                        {formatMonthLabel(rawMonth)}
-                      </td>
-                      <td className="p-3 text-right font-mono font-bold text-emerald-900">
-                        NPR {Number(dep.amount_paid || 0).toLocaleString('en-IN')}
-                      </td>
-                      <td className="p-3 text-xs text-slate-600 font-mono">
-                        {formatNptDateTime(dep.created_at)}
-                      </td>
-                      <td className="p-3 text-xs text-slate-700 font-sans">
-                        <div className="font-bold">{cleanName}</div>
-                        {dep.recorded_by_designation && (
-                          <div className="text-[10px] text-slate-400">{dep.recorded_by_designation}</div>
-                        )}
-                      </td>
-                      <td className="p-3 text-right">
-                        <DepositReceiptModal receipt={{
-                          deposit_code,
-                          for_month: rawMonth,
-                          amount_paid: Number(dep.amount_paid || 0),
-                          created_at: dep.created_at,
-                          member_name: dep.profiles?.full_name || 'Member',
-                          member_account_id: dep.profiles?.account_id || 'N/A',
-                          deposited_by_name: dep.deposited_by_name,
-                          recorded_by_name: cleanName,
-                          recorded_by_designation: dep.recorded_by_designation,
-                        }} />
-                      </td>
-                    </tr>
-                  );
-                })}
-
-                {myDeposits.length === 0 && (
-                  <tr>
-                    <td colSpan={6} className="p-6 text-center text-slate-400 text-xs font-medium">
-                      No personal deposits recorded under your account yet.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <MyDepositsLedger myDeposits={myDeposits} isAdmin={isAdmin} />
       )}
 
       {/* SECTION 2: GROUP SAVINGS DIRECTORY */}
@@ -220,7 +153,7 @@ export default function GroupSavingsDirectoryContainer({
             <div>
               <h3 className="font-bold text-base">Group Savings Directory</h3>
               <p className="text-xs text-slate-400 print:text-slate-600">
-                Complete savings deposits directory across all group accounts ({filteredDeposits.length} Records)
+                Complete savings deposits directory across all group accounts ({filteredAndSortedDeposits.length} Records)
               </p>
             </div>
           </div>
@@ -249,7 +182,7 @@ export default function GroupSavingsDirectoryContainer({
         </div>
 
         {/* Search & Filter Bar (Hidden when printing) */}
-        <div className="p-3.5 bg-slate-50 border-b border-slate-200 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 print:hidden">
+        <div className="p-3.5 bg-slate-50 border-b border-slate-200 flex flex-col xl:flex-row items-stretch xl:items-center justify-between gap-3 print:hidden">
           
           {/* Member / Deposit ID / Representative Search */}
           <div className="relative flex-1">
@@ -271,15 +204,16 @@ export default function GroupSavingsDirectoryContainer({
             )}
           </div>
 
-          {/* Year Dropdown Filter & Reset */}
-          <div className="flex items-center gap-2 text-xs font-bold text-slate-700">
-            <div className="flex items-center gap-1.5 bg-white px-3 py-1.5 rounded-xl border border-slate-300">
-              <Filter size={14} className="text-emerald-700" />
-              <span className="text-slate-500 font-sans">Year:</span>
+          {/* Year Dropdown & Sort Filters */}
+          <div className="flex flex-wrap items-center gap-2 text-xs font-bold text-slate-700">
+            
+            <div className="flex items-center gap-1.5 bg-white px-2 py-1.5 rounded-xl border border-slate-300">
+              <Filter size={13} className="text-emerald-700" />
+              <span className="text-[11px] text-slate-500 font-sans">Year:</span>
               <select
                 value={selectedYear}
                 onChange={(e) => setSelectedYear(e.target.value)}
-                className="bg-transparent font-mono text-xs font-bold text-slate-900 focus:outline-none cursor-pointer"
+                className="bg-transparent font-mono text-[11px] font-bold text-slate-900 focus:outline-none cursor-pointer"
               >
                 <option value="">All Years ({availableYears.length})</option>
                 {availableYears.map((yr) => (
@@ -288,12 +222,27 @@ export default function GroupSavingsDirectoryContainer({
               </select>
             </div>
 
-            {(searchTerm || selectedYear) && (
+            <div className="flex items-center gap-1.5 bg-white px-2 py-1.5 rounded-xl border border-slate-300">
+              <ArrowUpDown size={13} className="text-emerald-700" />
+              <span className="text-[11px] text-slate-500 font-sans">Sort:</span>
+              <select
+                value={sortOption}
+                onChange={(e) => setSortOption(e.target.value)}
+                className="bg-transparent font-mono text-[11px] font-bold text-slate-900 focus:outline-none cursor-pointer"
+              >
+                <option value="recorded_desc">Recorded (Newest)</option>
+                <option value="recorded_asc">Recorded (Oldest)</option>
+                <option value="month_desc">Month (Newest)</option>
+                <option value="month_asc">Month (Oldest)</option>
+              </select>
+            </div>
+
+            {(searchTerm || selectedYear || sortOption !== 'recorded_desc') && (
               <button
                 onClick={handleResetFilters}
-                className="px-3 py-2 bg-slate-200 hover:bg-slate-300 text-slate-800 rounded-xl text-xs font-bold flex items-center gap-1 transition-colors"
+                className="px-2.5 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-800 rounded-xl text-xs font-bold flex items-center gap-1 transition-colors"
               >
-                <RotateCcw size={13} /> Reset
+                <RotateCcw size={12} /> Reset
               </button>
             )}
           </div>
@@ -315,7 +264,7 @@ export default function GroupSavingsDirectoryContainer({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {filteredDeposits.map((dep: any) => {
+              {filteredAndSortedDeposits.map((dep: any) => {
                 const depIdStr = dep.id ? String(dep.id).padStart(4, '0') : '0000';
                 const deposit_code = dep.deposit_code || `DP-${depIdStr}`;
                 const rawMonth = dep.for_month?.slice(0, 7);
@@ -417,7 +366,7 @@ export default function GroupSavingsDirectoryContainer({
                 );
               })}
 
-              {filteredDeposits.length === 0 && (
+              {filteredAndSortedDeposits.length === 0 && (
                 <tr>
                   <td colSpan={7} className="p-8 text-center text-slate-400 text-xs font-sans">
                     No group savings deposit records match your applied filters.
@@ -427,16 +376,16 @@ export default function GroupSavingsDirectoryContainer({
             </tbody>
 
             {/* TOTAL SUMMARY FOOTER ROW - RENDERS ONLY ONCE AT THE VERY END */}
-            {filteredDeposits.length > 0 && (
-              <tfoot className="bg-slate-100/90 text-slate-900 border-t-2 border-slate-300 font-bold">
+            {filteredAndSortedDeposits.length > 0 && (
+              <tfoot className="bg-slate-100/90 text-slate-900 border-t-2 border-slate-300 font-bold print:border-t-2 print:border-slate-800">
                 <tr>
                   <td colSpan={3} className="p-3 text-left font-sans uppercase text-xs font-black tracking-wider">
-                    Total Filtered Deposits ({filteredDeposits.length} Entries)
+                    Total Filtered Deposits ({filteredAndSortedDeposits.length} Entries)
                   </td>
                   <td className="p-3 text-right font-mono text-sm font-black text-emerald-950">
                     NPR {totalAccumulatedSavings.toLocaleString('en-IN')}
                   </td>
-                  <td colSpan={3} className="p-3 text-slate-400 font-mono text-[10px]">
+                  <td colSpan={3} className="p-3 text-slate-400 font-mono text-[10px] print:hidden">
                     Verified Group Total
                   </td>
                 </tr>

@@ -182,8 +182,61 @@ export default async function DashboardPage() {
 
   const totalAssetsValuation = (assets || []).reduce((sum, a) => sum + Number(a.current_value || 0), 0);
 
-  // Derived Financial Calculations
-  const activeLoanPortfolio = Math.max(0, totalDisbursedLoans - totalPrincipalRepaid);
+  // ==========================================
+  // LOAN LOGIC & PORTFOLIO CALCULATIONS
+  // ==========================================
+  
+  // Pre-calculate the remaining balance for all loans
+  const loansWithBalances = loanList.map((loan) => {
+    const loanPayments = paymentList.filter((p) => String(p.loan_id) === String(loan.id));
+    const repaid = loanPayments.reduce((sum, p) => sum + Number(p.principal_paid || 0), 0);
+    const balance = Math.max(0, Number(loan.principal_amount || 0) - repaid);
+    return { ...loan, balance, loanPayments };
+  });
+
+  // Filter for TRULY active loans (Status is ACTIVE AND Balance > 0)
+  const trueActiveLoans = loansWithBalances.filter(
+    (l) => l.status === 'ACTIVE' && l.balance > 0
+  );
+
+  const activeLoanPortfolio = trueActiveLoans.reduce((sum, l) => sum + l.balance, 0);
+  
+  // Calculate UNIQUE active borrowers by mapping their IDs into a Set
+  const uniqueActiveBorrowersCount = new Set(trueActiveLoans.map((l) => l.borrower_id)).size;
+
+  // Track EMI Schedules for the True Active Loans
+  const loanEmiTrackers = trueActiveLoans.map((loan) => {
+    const borrower = profileList.find((p) => p.id === loan.borrower_id);
+
+    const sortedPayments = [...loan.loanPayments].sort(
+      (a, b) => new Date(b.payment_date).getTime() - new Date(a.payment_date).getTime()
+    );
+    const lastPaymentDate = sortedPayments[0]?.payment_date || loan.issue_date;
+    
+    const nextDueDate = new Date(lastPaymentDate);
+    nextDueDate.setMonth(nextDueDate.getMonth() + 1);
+
+    const isOverdue = nextDueDate < today;
+
+    return {
+      loanId: loan.id,
+      loanCode: loan.loan_code || `LN-${loan.id}`,
+      borrowerId: loan.borrower_id,
+      borrowerName: borrower?.full_name || 'Borrower',
+      accountId: borrower?.account_id || 'N/A',
+      monthlyEmi: Number(loan.monthly_emi || 0),
+      balance: loan.balance,
+      nextDueDate: nextDueDate.toISOString().split('T')[0],
+      isOverdue,
+    };
+  });
+
+  const overdueEmiCount = loanEmiTrackers.filter((t) => t.isOverdue).length;
+
+  // ==========================================
+  // FINANCIAL SUMMARIES
+  // ==========================================
+
   const totalGroupEarnings = totalInterestCollected + totalBankInterest;
   const liquidCashOnHand = (totalSavingsCollected + totalPrincipalRepaid + totalGroupEarnings) - totalDisbursedLoans - totalExpenses;
   const netGroupWorth = liquidCashOnHand + activeLoanPortfolio + totalAssetsValuation;
@@ -193,49 +246,26 @@ export default async function DashboardPage() {
     ? Math.min(100, Math.round((liquidCashOnHand / totalSavingsCollected) * 100))
     : 100;
 
-  // Active Loans Tracker
-  const activeLoansList = loanList.filter((l) => l.status === 'ACTIVE');
-  const loanEmiTrackers = activeLoansList.map((loan) => {
-    const borrower = profileList.find((p) => p.id === loan.borrower_id);
-    const loanPayments = paymentList.filter((p) => String(p.loan_id) === String(loan.id));
-    const repaid = loanPayments.reduce((sum, p) => sum + Number(p.principal_paid || 0), 0);
-    const balance = Math.max(0, Number(loan.principal_amount || 0) - repaid);
-
-    const sortedPayments = [...loanPayments].sort(
-      (a, b) => new Date(b.payment_date).getTime() - new Date(a.payment_date).getTime()
-    );
-    const lastPaymentDate = sortedPayments[0]?.payment_date || loan.issue_date;
-    
-    const nextDueDate = new Date(lastPaymentDate);
-    nextDueDate.setMonth(nextDueDate.getMonth() + 1);
-
-    const isOverdue = nextDueDate < today && balance > 0;
-
-    return {
-      loanId: loan.id,
-      loanCode: loan.loan_code || `LN-${loan.id}`,
-      borrowerId: loan.borrower_id,
-      borrowerName: borrower?.full_name || 'Borrower',
-      accountId: borrower?.account_id || 'N/A',
-      monthlyEmi: Number(loan.monthly_emi || 0),
-      balance,
-      nextDueDate: nextDueDate.toISOString().split('T')[0],
-      isOverdue,
-    };
-  }).filter((t) => t.balance > 0);
-
-  const overdueEmiCount = loanEmiTrackers.filter((t) => t.isOverdue).length;
-
-  // Member-Specific Derived Metrics
+  // ==========================================
+  // MEMBER-SPECIFIC METRICS
+  // ==========================================
   const myDeposits = depositList.filter((d) => String(d.member_id) === String(currentUserId));
   const myTotalSavings = myDeposits.reduce((sum, d) => sum + Number(d.amount_paid || 0), 0);
   const myNextDepositMonth = getNextEligibleMonth(currentUserId, depositList);
-  const myActiveLoanTracker = loanEmiTrackers.find((t) => String(t.borrowerId) === String(currentUserId));
+  
+  // Find all active loans for this specific member and sum them up
+  const myActiveLoans = loanEmiTrackers.filter((t) => String(t.borrowerId) === String(currentUserId));
+  const myTotalLoanBalance = myActiveLoans.reduce((sum, t) => sum + t.balance, 0);
+  const myPrimaryLoan = myActiveLoans[0]; // Used for display logic
 
-  // Member Peer Radar Data (Fully Unmasked for Admins, Account IDs Masked for Members)
+  // Member Peer Radar Data
   const memberComplianceList = activeMembers.map((m) => {
     const nextMonth = getNextEligibleMonth(m.id, depositList);
-    const activeLoan = loanEmiTrackers.find((t) => String(t.borrowerId) === String(m.id));
+    
+    // Sum EMIs if member has multiple active loans
+    const memberLoans = loanEmiTrackers.filter((t) => String(t.borrowerId) === String(m.id));
+    const totalEmiDue = memberLoans.reduce((sum, t) => sum + t.monthlyEmi, 0);
+    const hasActiveLoan = memberLoans.length > 0;
     const isDueDeposit = nextMonth <= currentMonthStr;
 
     return {
@@ -245,8 +275,8 @@ export default async function DashboardPage() {
       displayAccountId: isAdmin ? (m.account_id || 'N/A') : maskAccountId(m.account_id),
       nextDepositMonth: nextMonth,
       isDueDeposit,
-      hasActiveLoan: !!activeLoan,
-      loanEMI: activeLoan ? Number(activeLoan.monthlyEmi || 0) : 0,
+      hasActiveLoan,
+      loanEMI: totalEmiDue,
     };
   });
 
@@ -348,10 +378,10 @@ export default async function DashboardPage() {
                 <Landmark size={18} />
               </div>
               <div className="text-2xl font-black text-amber-950 font-mono">
-                NPR {(myActiveLoanTracker?.balance || 0).toLocaleString('en-IN')}
+                NPR {myTotalLoanBalance.toLocaleString('en-IN')}
               </div>
               <p className="text-[11px] text-amber-800 font-semibold">
-                {myActiveLoanTracker ? `Code: ${myActiveLoanTracker.loanCode}` : 'No Active Loans'}
+                {myPrimaryLoan ? `Code: ${myPrimaryLoan.loanCode}${myActiveLoans.length > 1 ? ` (+${myActiveLoans.length - 1} more)` : ''}` : 'No Active Loans'}
               </p>
             </div>
 
@@ -417,24 +447,24 @@ export default async function DashboardPage() {
                 <div className="flex justify-between items-center">
                   <span className="font-bold text-slate-700">Loan Repayment EMI</span>
                   <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold ${
-                    myActiveLoanTracker ? (myActiveLoanTracker.isOverdue ? 'bg-red-100 text-red-800' : 'bg-amber-100 text-amber-900') : 'bg-slate-200 text-slate-600'
+                    myPrimaryLoan ? (myPrimaryLoan.isOverdue ? 'bg-red-100 text-red-800' : 'bg-amber-100 text-amber-900') : 'bg-slate-200 text-slate-600'
                   }`}>
-                    {myActiveLoanTracker ? (myActiveLoanTracker.isOverdue ? 'OVERDUE' : 'EMI DUE') : 'NO LOAN'}
+                    {myPrimaryLoan ? (myPrimaryLoan.isOverdue ? 'OVERDUE' : 'EMI DUE') : 'NO LOAN'}
                   </span>
                 </div>
-                {myActiveLoanTracker ? (
+                {myPrimaryLoan ? (
                   <>
                     <div className="text-slate-900 font-mono text-sm font-extrabold">
-                      Monthly EMI: NPR {myActiveLoanTracker.monthlyEmi.toLocaleString('en-IN')}
+                      Monthly EMI: NPR {myPrimaryLoan.monthlyEmi.toLocaleString('en-IN')}
                     </div>
                     <div className="text-slate-700 font-mono text-xs font-bold flex items-center justify-between">
                       <span>Next Due Date:</span>
-                      <span className={myActiveLoanTracker.isOverdue ? 'text-red-700 font-black' : 'text-blue-900 font-black'}>
-                        {myActiveLoanTracker.nextDueDate}
+                      <span className={myPrimaryLoan.isOverdue ? 'text-red-700 font-black' : 'text-blue-900 font-black'}>
+                        {myPrimaryLoan.nextDueDate}
                       </span>
                     </div>
                     <p className="text-[11px] text-slate-500">
-                      Remaining Principal Balance: NPR {myActiveLoanTracker.balance.toLocaleString('en-IN')}
+                      Remaining Principal Balance: NPR {myTotalLoanBalance.toLocaleString('en-IN')}
                     </p>
                   </>
                 ) : (
@@ -592,7 +622,7 @@ export default async function DashboardPage() {
               <div className="text-xl font-black text-amber-950 font-mono">
                 NPR {activeLoanPortfolio.toLocaleString('en-IN')}
               </div>
-              <p className="text-[11px] text-amber-900 font-semibold">{activeLoansList.length} Active Borrowers</p>
+              <p className="text-[11px] text-amber-900 font-semibold">{uniqueActiveBorrowersCount} Active Borrowers</p>
             </div>
 
             {/* Total Group Revenue */}

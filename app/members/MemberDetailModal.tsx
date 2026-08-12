@@ -251,7 +251,7 @@ export default function MemberDetailModal({
                     </h4>
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 p-3 bg-slate-50 rounded-xl border border-slate-200">
                       <div><span className="text-slate-400 block text-[10px]">Full Name</span> <strong className="text-slate-900">{member.full_name}</strong></div>
-                      <div><span className="text-slate-400 block text-[10px]">Committee Designation</span> <strong className="text-slate-900">{member.committee_position || 'General Participant'}</strong></div>
+                      <div><span className="text-slate-400 block text-[10px]">Committee Designation</span> <strong className="text-slate-900">{member.committee_position || 'General Member'}</strong></div>
                       <div><span className="text-slate-400 block text-[10px]">Joined Date</span> <strong className="text-slate-900 font-mono">{member.joined_date || 'N/A'}</strong></div>
                     </div>
                   </div>
