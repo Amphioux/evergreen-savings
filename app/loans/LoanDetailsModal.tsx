@@ -38,10 +38,7 @@ export default function LoanDetailsModal({ loan }: LoanDetailsModalProps) {
 
   if (!loan) return null;
 
-  // Make it bulletproof: handles both "borrower" and "profiles" aliases from the DB
   const borrowerData = loan.borrower || loan.profiles || {};
-
-  // Compute specific loan aggregates safely
   const loanPayments = loan.loanPayments || [];
   const totalInterestPaid = loanPayments.reduce(
     (sum: number, p: any) => sum + Number(p.interest_paid || 0),
@@ -49,12 +46,10 @@ export default function LoanDetailsModal({ loan }: LoanDetailsModalProps) {
   );
   const totalPrincipalPaid = loan.totalRepaid || 0;
 
-  // Sort payments chronologically (newest first)
   const sortedPayments = [...loanPayments].sort(
     (a, b) => new Date(b.payment_date).getTime() - new Date(a.payment_date).getTime()
   );
 
-  // Check if borrower is an internal member
   const isInternalMember =
     borrowerData.user_type === 'MEMBER' || (!loan.guarantor_id && !loan.guarantor);
 
@@ -82,8 +77,39 @@ export default function LoanDetailsModal({ loan }: LoanDetailsModalProps) {
       </button>
 
       {isOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 text-left print:absolute print:inset-0 print:bg-white print:p-0">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-3xl w-full border border-slate-200 overflow-hidden flex flex-col max-h-[90vh] print:max-h-none print:shadow-none print:border-none print:block">
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 text-left print:static print:p-0 print:bg-white print:block">
+          
+          {/* OPTIMUM MODAL PRINT OVERRIDE */}
+          <style type="text/css" media="print">
+            {`
+              @page { size: auto; margin: 10mm; }
+              html, body {
+                height: auto !important;
+                min-height: 0 !important;
+                overflow: visible !important;
+                background: white !important;
+                margin: 0 !important;
+                padding: 0 !important;
+              }
+              body * { visibility: hidden !important; }
+              .printable-modal-zone, .printable-modal-zone * { visibility: visible !important; }
+              .printable-modal-zone {
+                position: absolute !important;
+                left: 0 !important;
+                top: 0 !important;
+                width: 100% !important;
+                height: auto !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                box-shadow: none !important;
+                border: none !important;
+                background: white !important;
+                overflow: visible !important;
+              }
+            `}
+          </style>
+
+          <div className="printable-modal-zone bg-white rounded-2xl shadow-2xl max-w-3xl w-full border border-slate-200 overflow-hidden flex flex-col max-h-[90vh] print:max-h-none print:overflow-visible">
             
             {/* Modal Header */}
             <div className="p-4 border-b border-slate-200 flex justify-between items-center bg-slate-50 print:hidden">
@@ -105,9 +131,8 @@ export default function LoanDetailsModal({ loan }: LoanDetailsModalProps) {
                   {loan.isPaidOff ? 'PAID OFF' : 'ACTIVE'}
                 </span>
 
-                {/* Print Button */}
                 <button
-                  onClick={() => window.print()}
+                  onClick={() => window.open(`/loans/ledger-print?type=single&id=${loan.id}`, '_blank')}
                   className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-xs font-bold transition-colors"
                 >
                   <Printer size={14} /> Print
@@ -123,8 +148,8 @@ export default function LoanDetailsModal({ loan }: LoanDetailsModalProps) {
             </div>
 
             {/* Print-Only Header */}
-            <div className="hidden print:block text-center border-b border-slate-300 pb-4 mb-4 pt-4">
-              <h1 className="text-2xl font-black text-slate-900 uppercase">EVERGREEN SAVINGS GROUP</h1>
+            <div className="hidden print:block text-center border-b border-slate-300 pb-3 mb-3 pt-1">
+              <h1 className="text-xl font-black text-slate-900 uppercase">EVERGREEN SAVINGS GROUP</h1>
               <p className="text-xs text-slate-600 font-bold uppercase tracking-wider">
                 Official Single Loan Ledger — {loan.loan_code}
               </p>
@@ -134,10 +159,9 @@ export default function LoanDetailsModal({ loan }: LoanDetailsModalProps) {
             </div>
 
             {/* Scrollable Modal Body */}
-            <div className="p-5 overflow-y-auto space-y-6 print:overflow-visible print:p-0">
+            <div className="p-5 overflow-y-auto space-y-5 print:overflow-visible print:p-0">
 
-              {/* Approval Authority & PDF Document Card */}
-              <div className="p-3.5 bg-amber-50/60 border border-amber-200 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 print:border-slate-300 print:bg-transparent">
+              <div className="p-3 bg-amber-50/60 border border-amber-200 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 print:border-slate-300 print:bg-transparent">
                 <div className="flex items-center gap-2.5">
                   <div className="p-2 bg-amber-100 text-amber-800 rounded-lg print:hidden">
                     <UserCheck size={18} />
@@ -171,16 +195,12 @@ export default function LoanDetailsModal({ loan }: LoanDetailsModalProps) {
                 )}
               </div>
 
-              {/* Top Section: Parties & Terms */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-
-                {/* Involved Parties */}
-                <div className="space-y-3 p-4 bg-slate-50 rounded-xl border border-slate-100 print:border-slate-300 print:bg-transparent">
+                <div className="space-y-3 p-3.5 bg-slate-50 rounded-xl border border-slate-100 print:border-slate-300 print:bg-transparent">
                   <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 print:text-slate-600">
                     Involved Parties
                   </h4>
 
-                  {/* Borrower Details */}
                   <div className="flex items-start gap-2">
                     <User size={16} className="text-blue-700 mt-0.5 flex-shrink-0" />
                     <div>
@@ -194,9 +214,8 @@ export default function LoanDetailsModal({ loan }: LoanDetailsModalProps) {
                     </div>
                   </div>
 
-                  {/* Guarantor Details / Status */}
                   {isInternalMember ? (
-                    <div className="flex items-start gap-2 mt-3 pt-3 border-t border-slate-200 opacity-60">
+                    <div className="flex items-start gap-2 mt-2 pt-2 border-t border-slate-200 opacity-60">
                       <ShieldCheck size={16} className="text-slate-400 mt-0.5 flex-shrink-0" />
                       <div>
                         <div className="text-xs font-semibold text-slate-400">Guarantor Status</div>
@@ -207,7 +226,7 @@ export default function LoanDetailsModal({ loan }: LoanDetailsModalProps) {
                       </div>
                     </div>
                   ) : loan.guarantor ? (
-                    <div className="flex items-start gap-2 mt-3 pt-3 border-t border-slate-200">
+                    <div className="flex items-start gap-2 mt-2 pt-2 border-t border-slate-200">
                       <ShieldCheck size={16} className="text-amber-700 mt-0.5 flex-shrink-0" />
                       <div>
                         <div className="text-xs text-amber-800 font-bold">Assigned Guarantor (Member)</div>
@@ -218,7 +237,7 @@ export default function LoanDetailsModal({ loan }: LoanDetailsModalProps) {
                       </div>
                     </div>
                   ) : (
-                    <div className="flex items-start gap-2 mt-3 pt-3 border-t border-slate-200 text-amber-800 bg-amber-50 p-2 rounded-lg border border-amber-200">
+                    <div className="flex items-start gap-2 mt-2 pt-2 border-t border-slate-200 text-amber-800 bg-amber-50 p-2 rounded-lg border border-amber-200">
                       <ShieldAlert size={16} className="text-amber-700 mt-0.5 flex-shrink-0" />
                       <div>
                         <div className="text-xs font-bold text-amber-900">Guarantor Missing</div>
@@ -230,12 +249,11 @@ export default function LoanDetailsModal({ loan }: LoanDetailsModalProps) {
                   )}
                 </div>
 
-                {/* Terms */}
-                <div className="space-y-3 p-4 bg-slate-50 rounded-xl border border-slate-100 print:border-slate-300 print:bg-transparent">
+                <div className="space-y-3 p-3.5 bg-slate-50 rounded-xl border border-slate-100 print:border-slate-300 print:bg-transparent">
                   <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 print:text-slate-600">
                     Loan Terms
                   </h4>
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-2 gap-3">
                     <div>
                       <div className="text-xs text-slate-500">Principal</div>
                       <div className="font-bold font-mono text-slate-900 text-sm">
@@ -261,78 +279,76 @@ export default function LoanDetailsModal({ loan }: LoanDetailsModalProps) {
                 </div>
               </div>
 
-              {/* Middle Section: Financial Summary */}
               <div>
-                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 print:text-slate-600">
+                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 print:text-slate-600">
                   Financial Summary
                 </h4>
-                <div className="grid grid-cols-3 gap-3 print:gap-4">
-                  <div className="p-3 bg-emerald-50 border border-emerald-100 rounded-lg print:border-slate-300 print:bg-transparent">
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="p-2.5 bg-emerald-50 border border-emerald-100 rounded-lg print:border-slate-300 print:bg-transparent">
                     <div className="text-[10px] font-bold text-emerald-700 uppercase print:text-slate-500">
                       Total Principal Repaid
                     </div>
-                    <div className="font-mono text-lg font-black text-emerald-950">
+                    <div className="font-mono text-base font-black text-emerald-950">
                       NPR {totalPrincipalPaid.toLocaleString('en-IN')}
                     </div>
                   </div>
-                  <div className="p-3 bg-purple-50 border border-purple-100 rounded-lg print:border-slate-300 print:bg-transparent">
+                  <div className="p-2.5 bg-purple-50 border border-purple-100 rounded-lg print:border-slate-300 print:bg-transparent">
                     <div className="text-[10px] font-bold text-purple-700 uppercase print:text-slate-500">
                       Total Interest Paid
                     </div>
-                    <div className="font-mono text-lg font-black text-purple-950">
+                    <div className="font-mono text-base font-black text-purple-950">
                       NPR {totalInterestPaid.toLocaleString('en-IN')}
                     </div>
                   </div>
-                  <div className="p-3 bg-amber-50 border border-amber-100 rounded-lg print:border-slate-300 print:bg-transparent">
+                  <div className="p-2.5 bg-amber-50 border border-amber-100 rounded-lg print:border-slate-300 print:bg-transparent">
                     <div className="text-[10px] font-bold text-amber-700 uppercase print:text-slate-500">
                       Remaining Principal
                     </div>
-                    <div className="font-mono text-lg font-black text-amber-950">
+                    <div className="font-mono text-base font-black text-amber-950">
                       NPR {loan.remainingBalance.toLocaleString('en-IN')}
                     </div>
                   </div>
                 </div>
               </div>
 
-              {/* Bottom Section: Transaction Ledger */}
               <div>
-                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 flex justify-between items-end print:text-slate-600">
+                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 flex justify-between items-end print:text-slate-600">
                   <span>Transaction Ledger ({sortedPayments.length})</span>
                 </h4>
                 <div className="border border-slate-200 rounded-xl overflow-hidden print:border-slate-300">
                   <table className="w-full text-left text-xs font-mono">
                     <thead className="bg-slate-100 text-slate-600 uppercase text-[10px] border-b border-slate-200 print:bg-transparent print:border-slate-300">
                       <tr>
-                        <th className="p-2.5">Date</th>
-                        <th className="p-2.5">Payment ID</th>
-                        <th className="p-2.5 text-right">Principal</th>
-                        <th className="p-2.5 text-right">Interest</th>
-                        <th className="p-2.5 text-right">Total</th>
-                        <th className="p-2.5 text-right font-sans">Authorized By</th>
+                        <th className="p-2">Date</th>
+                        <th className="p-2">Payment ID</th>
+                        <th className="p-2 text-right">Principal</th>
+                        <th className="p-2 text-right">Interest</th>
+                        <th className="p-2 text-right">Total</th>
+                        <th className="p-2 text-right font-sans">Authorized By</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 print:divide-slate-300">
                       {sortedPayments.map((p: any) => (
                         <tr key={p.id} className="hover:bg-slate-50">
-                          <td className="p-2.5 font-bold text-slate-700">{p.payment_date}</td>
-                          <td className="p-2.5 text-blue-800">{p.payment_code || `PY-${p.id}`}</td>
-                          <td className="p-2.5 text-right text-emerald-800 font-bold">
+                          <td className="p-2 font-bold text-slate-700">{p.payment_date}</td>
+                          <td className="p-2 text-blue-800">{p.payment_code || `PY-${p.id}`}</td>
+                          <td className="p-2 text-right text-emerald-800 font-bold">
                             NPR {Number(p.principal_paid || 0).toLocaleString('en-IN')}
                           </td>
-                          <td className="p-2.5 text-right text-purple-800 font-bold">
+                          <td className="p-2 text-right text-purple-800 font-bold">
                             NPR {Number(p.interest_paid || 0).toLocaleString('en-IN')}
                           </td>
-                          <td className="p-2.5 text-right text-slate-900 font-black">
+                          <td className="p-2 text-right text-slate-900 font-black">
                             NPR {(Number(p.principal_paid || 0) + Number(p.interest_paid || 0)).toLocaleString('en-IN')}
                           </td>
-                          <td className="p-2.5 text-right text-slate-500 font-sans text-[10px] truncate max-w-[100px]">
+                          <td className="p-2 text-right text-slate-500 font-sans text-[10px] truncate max-w-[100px]">
                             {p.recorded_by_name}
                           </td>
                         </tr>
                       ))}
                       {sortedPayments.length === 0 && (
                         <tr>
-                          <td colSpan={6} className="p-6 text-center text-slate-400 font-sans text-xs">
+                          <td colSpan={6} className="p-4 text-center text-slate-400 font-sans text-xs">
                             No repayments have been made towards this loan yet.
                           </td>
                         </tr>
@@ -342,8 +358,7 @@ export default function LoanDetailsModal({ loan }: LoanDetailsModalProps) {
                 </div>
               </div>
 
-              {/* Print-Only Signature Footer */}
-              <div className="hidden print:grid pt-8 mt-8 grid-cols-2 gap-8 text-xs font-mono border-t-2 border-slate-900">
+              <div className="hidden print:grid pt-6 mt-6 grid-cols-2 gap-8 text-xs font-mono border-t-2 border-slate-900">
                 <div className="space-y-1 font-sans">
                   <div className="font-bold text-slate-900 uppercase">Ledger Metadata:</div>
                   <div>
@@ -355,8 +370,8 @@ export default function LoanDetailsModal({ loan }: LoanDetailsModalProps) {
                 </div>
 
                 <div className="text-center flex flex-col justify-end items-center font-sans">
-                  <div className="border-b border-slate-400 w-56 mb-1 h-10"></div>
-                  <span className="font-bold text-slate-900 uppercase text-[11px]">
+                  <div className="border-b border-slate-400 w-48 mb-1 h-8"></div>
+                  <span className="font-bold text-slate-900 uppercase text-[10px]">
                     Authorized Executive Seal & Signature
                   </span>
                 </div>
