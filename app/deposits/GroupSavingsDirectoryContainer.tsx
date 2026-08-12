@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useMemo } from 'react';
-import { formatMonthLabel } from '@/lib/formatters';
+import { formatMonthLabel, formatNptDateTime } from '@/lib/formatters';
 import DepositReceiptModal from './DepositReceiptModal';
 import EditDepositModal from './EditDepositModal';
 import { 
@@ -46,13 +46,14 @@ export default function GroupSavingsDirectoryContainer({
     return Array.from(yearsSet).sort((a, b) => b.localeCompare(a));
   }, [depositList]);
 
-  // Filter group deposits based on search term and year
+  // Filter group deposits based on search term, representative name, and year
   const filteredDeposits = useMemo(() => {
     return depositList.filter((dep) => {
       const depIdStr = dep.id ? String(dep.id).padStart(4, '0') : '0000';
       const depositCode = (dep.deposit_code || `DP-${depIdStr}`).toLowerCase();
       const memberName = (dep.profiles?.full_name || '').toLowerCase();
       const accountId = (dep.profiles?.account_id || '').toLowerCase();
+      const depositedBy = (dep.deposited_by_name || '').toLowerCase();
       const recordedBy = cleanRecordedName(dep.recorded_by_name).toLowerCase();
       const rawYear = dep.for_month?.slice(0, 4) || '';
 
@@ -63,6 +64,7 @@ export default function GroupSavingsDirectoryContainer({
         !memberName.includes(query) &&
         !accountId.includes(query) &&
         !depositCode.includes(query) &&
+        !depositedBy.includes(query) &&
         !recordedBy.includes(query)
       ) {
         return false;
@@ -97,7 +99,21 @@ export default function GroupSavingsDirectoryContainer({
 
   return (
     <div className="space-y-6 text-left">
-      
+      {/* Hide the Group Directory Ledger during print if a batch print or single receipt is open */}
+      <style type="text/css" media="print">
+        {`
+          body:has(#batch-print-zone) .directory-ledger-section,
+          body:has([id^="single-receipt-print-zone"]) .directory-ledger-section {
+            display: none !important;
+          }
+          /* Force tfoot to only render once at the end of the printed table */
+          tfoot {
+            display: table-row-group !important;
+            break-inside: avoid !important;
+          }
+        `}
+      </style>
+
       {/* SECTION 1: MY PERSONAL SAVINGS LEDGER (Non-Admins Only) */}
       {!isAdmin && (
         <div className="bg-white rounded-2xl border border-emerald-200 shadow-sm overflow-hidden print:hidden">
@@ -125,7 +141,7 @@ export default function GroupSavingsDirectoryContainer({
                   <th className="p-3 font-mono">Deposit ID</th>
                   <th className="p-3">Contribution Month</th>
                   <th className="p-3 text-right">Amount Deposited</th>
-                  <th className="p-3">Recorded Date</th>
+                  <th className="p-3">Recorded Time</th>
                   <th className="p-3">Recorded By</th>
                   <th className="p-3 text-right">Receipt Voucher</th>
                 </tr>
@@ -146,8 +162,8 @@ export default function GroupSavingsDirectoryContainer({
                       <td className="p-3 text-right font-mono font-bold text-emerald-900">
                         NPR {Number(dep.amount_paid || 0).toLocaleString('en-IN')}
                       </td>
-                      <td className="p-3 text-xs text-slate-500 font-mono">
-                        {dep.created_at ? dep.created_at.slice(0, 10) : dep.for_month || 'N/A'}
+                      <td className="p-3 text-xs text-slate-600 font-mono">
+                        {formatNptDateTime(dep.created_at)}
                       </td>
                       <td className="p-3 text-xs text-slate-700 font-sans">
                         <div className="font-bold">{cleanName}</div>
@@ -160,9 +176,10 @@ export default function GroupSavingsDirectoryContainer({
                           deposit_code,
                           for_month: rawMonth,
                           amount_paid: Number(dep.amount_paid || 0),
-                          created_at: dep.created_at ? dep.created_at.slice(0, 10) : undefined,
+                          created_at: dep.created_at,
                           member_name: dep.profiles?.full_name || 'Member',
                           member_account_id: dep.profiles?.account_id || 'N/A',
+                          deposited_by_name: dep.deposited_by_name,
                           recorded_by_name: cleanName,
                           recorded_by_designation: dep.recorded_by_designation,
                         }} />
@@ -185,7 +202,7 @@ export default function GroupSavingsDirectoryContainer({
       )}
 
       {/* SECTION 2: GROUP SAVINGS DIRECTORY */}
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden print:border-none print:shadow-none">
+      <div className="directory-ledger-section bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden print:border-none print:shadow-none">
         
         {/* Printable Group Title Banner for Print Mode */}
         <div className="hidden print:block text-center border-b border-slate-300 pb-3 mb-4 space-y-1">
@@ -234,12 +251,12 @@ export default function GroupSavingsDirectoryContainer({
         {/* Search & Filter Bar (Hidden when printing) */}
         <div className="p-3.5 bg-slate-50 border-b border-slate-200 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 print:hidden">
           
-          {/* Member / Deposit ID Search */}
+          {/* Member / Deposit ID / Representative Search */}
           <div className="relative flex-1">
             <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
               type="text"
-              placeholder="Search Member Name, Account ID, Deposit ID, Collector Name..."
+              placeholder="Search Member, Account ID, Representative Name, Deposit ID..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               className="w-full pl-9 pr-8 py-2 text-xs border border-slate-300 rounded-xl bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-700 font-medium"
@@ -292,7 +309,7 @@ export default function GroupSavingsDirectoryContainer({
                 <th className="p-3">Member Name</th>
                 <th className="p-3">Contribution Month</th>
                 <th className="p-3 text-right">Amount Paid</th>
-                <th className="p-3">Recorded Date</th>
+                <th className="p-3">Recorded Time</th>
                 <th className="p-3">Recorded By</th>
                 <th className="p-3 text-right print:hidden">Receipt & Actions</th>
               </tr>
@@ -320,18 +337,30 @@ export default function GroupSavingsDirectoryContainer({
                       )}
                     </td>
 
-                    {/* Member Name */}
+                    {/* Member Name & Deposited By Identity Note */}
                     <td className="p-3 font-medium text-slate-900">
                       <div className="flex items-center gap-2">
-                        <span>{dep.profiles?.full_name || 'Member'}</span>
+                        <span className="font-bold">{dep.profiles?.full_name || 'Member'}</span>
                         {isOwnDeposit && (
                           <span className="px-2 py-0.5 bg-emerald-100 text-emerald-900 border border-emerald-300 rounded-full text-[10px] font-extrabold flex items-center gap-1 print:hidden">
                             <UserCheck size={11} /> You
                           </span>
                         )}
                       </div>
+
+                      {/* Depositor Identity Note */}
+                      {dep.deposited_by_name ? (
+                        <div className="text-[11px] text-amber-950 font-semibold mt-0.5">
+                          On Behalf Of: <strong>{dep.deposited_by_name}</strong>
+                        </div>
+                      ) : (
+                        <div className="text-[10px] text-slate-400 font-sans">
+                          Deposited By: <span className="font-bold text-slate-500">Self (Member)</span>
+                        </div>
+                      )}
+
                       {isAdmin && (
-                        <div className="text-xs text-slate-400 font-mono">
+                        <div className="text-xs text-slate-400 font-mono mt-0.5">
                           ID: {dep.profiles?.account_id || 'N/A'}
                         </div>
                       )}
@@ -347,9 +376,9 @@ export default function GroupSavingsDirectoryContainer({
                       NPR {Number(dep.amount_paid || 0).toLocaleString('en-IN')}
                     </td>
 
-                    {/* Recorded Date */}
-                    <td className="p-3 text-xs text-slate-500 font-mono">
-                      {dep.created_at ? dep.created_at.slice(0, 10) : 'N/A'}
+                    {/* Recorded Time in NPT */}
+                    <td className="p-3 text-xs text-slate-600 font-mono">
+                      {formatNptDateTime(dep.created_at)}
                     </td>
 
                     {/* Recorded By Collector */}
@@ -368,9 +397,10 @@ export default function GroupSavingsDirectoryContainer({
                             deposit_code,
                             for_month: rawMonth,
                             amount_paid: Number(dep.amount_paid || 0),
-                            created_at: dep.created_at ? dep.created_at.slice(0, 10) : undefined,
+                            created_at: dep.created_at,
                             member_name: dep.profiles?.full_name || 'Member',
                             member_account_id: dep.profiles?.account_id || 'N/A',
+                            deposited_by_name: dep.deposited_by_name,
                             recorded_by_name: cleanName,
                             recorded_by_designation: dep.recorded_by_designation,
                           }} />
@@ -395,6 +425,23 @@ export default function GroupSavingsDirectoryContainer({
                 </tr>
               )}
             </tbody>
+
+            {/* TOTAL SUMMARY FOOTER ROW - RENDERS ONLY ONCE AT THE VERY END */}
+            {filteredDeposits.length > 0 && (
+              <tfoot className="bg-slate-100/90 text-slate-900 border-t-2 border-slate-300 font-bold">
+                <tr>
+                  <td colSpan={3} className="p-3 text-left font-sans uppercase text-xs font-black tracking-wider">
+                    Total Filtered Deposits ({filteredDeposits.length} Entries)
+                  </td>
+                  <td className="p-3 text-right font-mono text-sm font-black text-emerald-950">
+                    NPR {totalAccumulatedSavings.toLocaleString('en-IN')}
+                  </td>
+                  <td colSpan={3} className="p-3 text-slate-400 font-mono text-[10px]">
+                    Verified Group Total
+                  </td>
+                </tr>
+              </tfoot>
+            )}
           </table>
         </div>
 

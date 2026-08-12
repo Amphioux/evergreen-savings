@@ -10,6 +10,12 @@ interface MyDepositsLedgerProps {
   isAdmin: boolean;
 }
 
+// Helper: Clean raw recorded name (removes "(Admin)" or "(Superadmin)" tags)
+function cleanRecordedName(name?: string): string {
+  if (!name) return 'System Admin';
+  return name.replace(/\s*\((Admin|Superadmin)\)/gi, '').trim();
+}
+
 export default function MyDepositsLedger({ myDeposits = [], isAdmin }: MyDepositsLedgerProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [fromMonth, setFromMonth] = useState('');
@@ -18,7 +24,7 @@ export default function MyDepositsLedger({ myDeposits = [], isAdmin }: MyDeposit
   // Safe Guarded Deposits Array
   const safeDeposits = useMemo(() => (Array.isArray(myDeposits) ? myDeposits : []), [myDeposits]);
 
-  // Filter personal deposits by Deposit ID, Month Name, and Date/Month Range
+  // Filter personal deposits by Deposit ID, Month Name, Representative Name, and Date/Month Range
   const filteredPersonalDeposits = useMemo(() => {
     return safeDeposits.filter((dep) => {
       // Safe guard for deposit code generation
@@ -27,10 +33,19 @@ export default function MyDepositsLedger({ myDeposits = [], isAdmin }: MyDeposit
       
       const rawMonth = dep.for_month?.slice(0, 7) || '';
       const formattedMonth = formatMonthLabel(rawMonth).toLowerCase();
+      const depositedBy = (dep.deposited_by_name || '').toLowerCase();
+      const recordedBy = cleanRecordedName(dep.recorded_by_name).toLowerCase();
       const query = searchTerm.toLowerCase().trim();
 
-      // 1. Search Filter (Matches Deposit ID or Month Name)
-      if (query && !code.includes(query) && !formattedMonth.includes(query) && !rawMonth.includes(query)) {
+      // 1. Search Filter (Matches Deposit ID, Month Name, Representative, or Collector)
+      if (
+        query && 
+        !code.includes(query) && 
+        !formattedMonth.includes(query) && 
+        !rawMonth.includes(query) &&
+        !depositedBy.includes(query) &&
+        !recordedBy.includes(query)
+      ) {
         return false;
       }
 
@@ -87,7 +102,7 @@ export default function MyDepositsLedger({ myDeposits = [], isAdmin }: MyDeposit
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
           <input
             type="text"
-            placeholder="Search by Deposit ID (e.g. DP2608-001) or Month..."
+            placeholder="Search by Deposit ID, Month, or Representative Name..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             className="w-full pl-9 pr-8 py-1.5 text-xs border border-slate-300 rounded-lg bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-700 font-medium"
@@ -147,6 +162,7 @@ export default function MyDepositsLedger({ myDeposits = [], isAdmin }: MyDeposit
               <th className="p-3">Contribution Month</th>
               <th className="p-3 text-right">Amount Deposited</th>
               <th className="p-3">Recorded Date</th>
+              <th className="p-3">Recorded By</th>
               <th className="p-3 text-right">Receipt Voucher</th>
             </tr>
           </thead>
@@ -155,6 +171,7 @@ export default function MyDepositsLedger({ myDeposits = [], isAdmin }: MyDeposit
               const depIdStr = dep.id ? String(dep.id).padStart(4, '0') : '0000';
               const deposit_code = dep.deposit_code || `DP-${depIdStr}`;
               const rawMonth = dep.for_month?.slice(0, 7) || '';
+              const cleanName = cleanRecordedName(dep.recorded_by_name);
 
               // Normalize profiles object / array from Supabase
               const profileObj = Array.isArray(dep.profiles) ? dep.profiles[0] : dep.profiles;
@@ -163,13 +180,28 @@ export default function MyDepositsLedger({ myDeposits = [], isAdmin }: MyDeposit
                 <tr key={dep.id || deposit_code} className="hover:bg-emerald-50/40 transition-colors">
                   <td className="p-3 font-mono font-bold text-emerald-900 text-xs">{deposit_code}</td>
                   <td className="p-3 font-bold text-slate-800">
-                    {formatMonthLabel(rawMonth)}
+                    <div>{formatMonthLabel(rawMonth)}</div>
+                    {dep.deposited_by_name ? (
+                      <div className="text-[10px] text-amber-900 font-semibold font-sans mt-0.5">
+                        Via Rep: {dep.deposited_by_name}
+                      </div>
+                    ) : (
+                      <div className="text-[10px] text-emerald-700 font-normal font-sans mt-0.5">
+                        Paid: Self (In Person)
+                      </div>
+                    )}
                   </td>
                   <td className="p-3 text-right font-mono font-bold text-emerald-900">
                     NPR {Number(dep.amount_paid || 0).toLocaleString('en-IN')}
                   </td>
                   <td className="p-3 text-xs text-slate-500 font-mono">
                     {dep.created_at ? dep.created_at.slice(0, 10) : dep.for_month || 'N/A'}
+                  </td>
+                  <td className="p-3 text-xs text-slate-700 font-sans">
+                    <div className="font-bold">{cleanName}</div>
+                    {dep.recorded_by_designation && (
+                      <div className="text-[10px] text-slate-400">{dep.recorded_by_designation}</div>
+                    )}
                   </td>
                   <td className="p-3 text-right">
                     <DepositReceiptModal receipt={{
@@ -178,8 +210,9 @@ export default function MyDepositsLedger({ myDeposits = [], isAdmin }: MyDeposit
                       amount_paid: Number(dep.amount_paid || 0),
                       created_at: dep.created_at ? dep.created_at.slice(0, 10) : undefined,
                       member_name: profileObj?.full_name || 'Member',
-                      member_account_id: isAdmin ? (profileObj?.account_id || 'N/A') : 'Self',
-                      recorded_by_name: dep.recorded_by_name,
+                      member_account_id: profileObj?.account_id || 'N/A',
+                      deposited_by_name: dep.deposited_by_name,
+                      recorded_by_name: cleanName,
                       recorded_by_designation: dep.recorded_by_designation,
                     }} />
                   </td>
@@ -189,7 +222,7 @@ export default function MyDepositsLedger({ myDeposits = [], isAdmin }: MyDeposit
 
             {filteredPersonalDeposits.length === 0 && (
               <tr>
-                <td colSpan={5} className="p-6 text-center text-slate-400 text-xs font-medium">
+                <td colSpan={6} className="p-6 text-center text-slate-400 text-xs font-medium">
                   No personal savings records found matching the applied filters.
                 </td>
               </tr>

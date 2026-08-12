@@ -1,8 +1,8 @@
 'use client';
 
-import { useState } from 'react';
-import { formatMonthLabel } from '@/lib/formatters';
-import { Printer, X, Receipt, CheckCircle, Award } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { formatMonthLabel, formatNptDateTime } from '@/lib/formatters';
+import { Printer, X, Receipt, CheckCircle, Award, Clock } from 'lucide-react';
 
 interface DepositReceiptModalProps {
   receipt?: {
@@ -12,14 +12,33 @@ interface DepositReceiptModalProps {
     created_at?: string;
     member_name: string;
     member_account_id: string;
+    deposited_by_name?: string | null;
     recorded_by_name?: string;
     recorded_by_designation?: string;
   };
   triggerLabel?: string;
+  initialOpen?: boolean;
 }
 
-export default function DepositReceiptModal({ receipt, triggerLabel = 'Print Slip' }: DepositReceiptModalProps) {
-  const [isOpen, setIsOpen] = useState(false);
+// Helper: Strips (Admin), (Superadmin), or similar tags from display names
+function cleanName(name?: string | null): string {
+  if (!name) return '';
+  return name.replace(/\s*\((Admin|Superadmin)\)/gi, '').trim();
+}
+
+export default function DepositReceiptModal({ 
+  receipt, 
+  triggerLabel = 'Print Slip',
+  initialOpen = false 
+}: DepositReceiptModalProps) {
+  const [isOpen, setIsOpen] = useState(initialOpen);
+
+  // Sync state if initialOpen changes externally
+  useEffect(() => {
+    if (initialOpen) {
+      setIsOpen(true);
+    }
+  }, [initialOpen]);
 
   if (!receipt) return null;
 
@@ -27,9 +46,15 @@ export default function DepositReceiptModal({ receipt, triggerLabel = 'Print Sli
     window.print();
   }
 
-  // Graceful fallback for older records without captured snapshots
-  const adminFullName = receipt.recorded_by_name || 'System Admin';
+  const rawAdminName = receipt.recorded_by_name || 'System Admin';
+  const adminFullName = cleanName(rawAdminName);
   const adminDesignation = receipt.recorded_by_designation || 'Committee Executive';
+
+  const memberNameClean = cleanName(receipt.member_name);
+  const depositorNameClean = receipt.deposited_by_name ? cleanName(receipt.deposited_by_name) : null;
+
+  // Unique print isolation ID per deposit voucher
+  const printZoneId = `single-receipt-print-zone-${receipt.deposit_code}`;
 
   return (
     <>
@@ -41,8 +66,39 @@ export default function DepositReceiptModal({ receipt, triggerLabel = 'Print Sli
       </button>
 
       {isOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 text-left">
-          <div className="bg-white rounded-xl shadow-2xl max-w-md w-full border border-slate-200 overflow-hidden print:shadow-none print:border-none print:w-full print:max-w-none">
+        <div 
+          id={printZoneId}
+          className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 text-left"
+        >
+          {/* Inject print isolation styles so only this voucher prints */}
+          <style type="text/css" media="print">
+            {`
+              @page { size: auto; margin: 15mm; }
+              body * { visibility: hidden !important; }
+              #${printZoneId}, #${printZoneId} * { visibility: visible !important; }
+              #${printZoneId} {
+                position: absolute;
+                left: 0;
+                top: 0;
+                width: 100%;
+                background: white !important;
+                display: flex !important;
+                justify-content: center !important;
+                align-items: flex-start !important;
+                padding: 0 !important;
+                margin: 0 !important;
+              }
+              .print-hide-modal-bg {
+                background: white !important;
+                box-shadow: none !important;
+                border: none !important;
+                max-width: 100% !important;
+                width: 100% !important;
+              }
+            `}
+          </style>
+
+          <div className="bg-white rounded-xl shadow-2xl max-w-md w-full border border-slate-200 overflow-hidden print-hide-modal-bg">
             
             {/* Modal Header */}
             <div className="p-4 bg-slate-900 text-white flex justify-between items-center print:hidden">
@@ -91,15 +147,33 @@ export default function DepositReceiptModal({ receipt, triggerLabel = 'Print Sli
               <div className="space-y-1.5 border-b border-slate-200 pb-3 font-sans">
                 <div className="flex justify-between">
                   <span className="text-slate-500">Member Name:</span>
-                  <strong className="text-slate-900 font-bold">{receipt.member_name}</strong>
+                  <strong className="text-slate-900 font-bold">{memberNameClean}</strong>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-500">Account ID:</span>
                   <strong className="font-mono text-blue-900">{receipt.member_account_id}</strong>
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-500">Record Date:</span>
-                  <strong className="font-mono text-slate-700">{receipt.created_at?.slice(0, 10) || new Date().toISOString().slice(0, 10)}</strong>
+
+                {/* Deposited By Identity Row */}
+                <div className="flex justify-between pt-1 border-t border-slate-100">
+                  <span className="text-slate-500">Deposited By:</span>
+                  <strong className="text-slate-900 font-bold">
+                    {depositorNameClean ? (
+                      <span className="text-amber-950 font-extrabold">{depositorNameClean} (Representative)</span>
+                    ) : (
+                      <span className="text-emerald-900 font-bold">Self (Member)</span>
+                    )}
+                  </strong>
+                </div>
+
+                {/* Record Date & NPT Time Stamp */}
+                <div className="flex justify-between items-center pt-1">
+                  <span className="text-slate-500 flex items-center gap-1">
+                    <Clock size={11} className="text-slate-400" /> Transaction Time:
+                  </span>
+                  <strong className="font-mono text-slate-800 text-[11px]">
+                    {formatNptDateTime(receipt.created_at)}
+                  </strong>
                 </div>
               </div>
 
@@ -114,7 +188,11 @@ export default function DepositReceiptModal({ receipt, triggerLabel = 'Print Sli
               {/* Signature Footer */}
               <div className="pt-6 grid grid-cols-2 gap-6 text-center text-[10px] text-slate-500 font-sans font-semibold border-t border-slate-200 mt-4">
                 <div>
-                  <div className="border-b border-slate-300 mb-1 h-10 flex items-end justify-center pb-1"></div>
+                  <div className="border-b border-slate-300 mb-1 h-10 flex flex-col justify-end items-center pb-1">
+                    <span className="font-bold text-slate-800 text-[11px]">
+                      {depositorNameClean || memberNameClean}
+                    </span>
+                  </div>
                   <span>Depositor Signature</span>
                 </div>
                 <div>

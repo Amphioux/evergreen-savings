@@ -33,8 +33,8 @@ async function getSupabaseServerClient() {
   );
 }
 
-// Helper: Auto-generate sequential Deposit ID
-async function generateDepositCode(): Promise<string> {
+// Helper: Auto-generate sequential Deposit ID (Format: DPYYMM-XXX) with optional offset for bulk loops
+async function generateDepositCode(offset: number = 0): Promise<string> {
   const now = new Date();
   const yy = now.getFullYear().toString().slice(-2);
   const mm = (now.getMonth() + 1).toString().padStart(2, '0');
@@ -60,7 +60,7 @@ async function generateDepositCode(): Promise<string> {
     }
   }
 
-  const nextSeq = (maxSeq + 1).toString().padStart(3, '0');
+  const nextSeq = (maxSeq + 1 + offset).toString().padStart(3, '0');
   return `${prefix}-${nextSeq}`;
 }
 
@@ -1118,11 +1118,12 @@ export async function settleAndDeactivateMember(formData: FormData) {
   return { success: `Account settled! Total Refund Paid: NPR ${netRefundPaid.toLocaleString('en-IN')}` };
 }
 
-// 13. Single Monthly Savings Deposit (With Immutable Admin Snapshot)
+// 13. Single Monthly Savings Deposit (With Immutable Admin Snapshot & Depositor Identity)
 export async function recordDeposit(formData: FormData) {
   const member_id = formData.get('member_id') as string;
   const for_month = formData.get('for_month') as string;
   const amount_paid = Number(formData.get('amount_paid')) || 500;
+  const deposited_by_name = (formData.get('deposited_by_name') as string)?.trim() || null;
 
   if (!member_id || !for_month) return { error: 'Member and month required.' };
 
@@ -1153,7 +1154,7 @@ export async function recordDeposit(formData: FormData) {
   const adminName = adminProfile?.full_name || 'System Admin';
   const adminDesignation = adminProfile?.committee_position || (adminProfile?.role === 'SUPER_ADMIN' ? 'Superadmin' : 'Executive');
 
-  const deposit_code = await generateDepositCode();
+  const deposit_code = await generateDepositCode(0);
 
   const { data: newDep, error } = await supabaseAdmin
     .from('deposits')
@@ -1162,6 +1163,7 @@ export async function recordDeposit(formData: FormData) {
       member_id,
       for_month: formattedMonth,
       amount_paid,
+      deposited_by_name,
       recorded_by_id: adminProfile?.id,
       recorded_by_name: adminName,
       recorded_by_designation: adminDesignation
@@ -1184,14 +1186,18 @@ export async function recordDeposit(formData: FormData) {
       created_at: newDep.created_at?.slice(0, 10),
       member_name: newDep.profiles?.full_name || 'Member',
       member_account_id: newDep.profiles?.account_id || 'N/A',
+      deposited_by_name,
       recorded_by_name: adminName,
       recorded_by_designation: adminDesignation,
     }
   };
 }
 
-// 14. BULK MEETING DEPOSITS
-export async function recordBulkDeposits(payload: { for_month: string; deposits: { member_id: string; amount_paid: number }[] }) {
+// 14. BULK MEETING DEPOSITS (With Sequential Offset Fix)
+export async function recordBulkDeposits(payload: { 
+  for_month: string; 
+  deposits: { member_id: string; amount_paid: number; deposited_by_name?: string | null }[] 
+}) {
   const { for_month, deposits: depositList } = payload;
   if (!for_month || !depositList || depositList.length === 0) return { error: 'Target month required.' };
 
@@ -1222,17 +1228,42 @@ export async function recordBulkDeposits(payload: { for_month: string; deposits:
   const adminName = adminProfile?.full_name || 'System Admin';
   const adminDesignation = adminProfile?.committee_position || (adminProfile?.role === 'SUPER_ADMIN' ? 'Superadmin' : 'Executive');
 
+  const { data: memberProfiles } = await supabaseAdmin
+    .from('profiles')
+    .select('id, full_name, account_id')
+    .in('id', selectedMemberIds);
+
+  const memberMap = new Map((memberProfiles || []).map((m) => [String(m.id), m]));
+
   const insertRows = [];
-  for (const d of depositList) {
-    const deposit_code = await generateDepositCode();
+  const generatedReceipts = [];
+
+  // Sequential Offset Loop guarantees unique IDs for bulk records (e.g. DP2608-001, DP2608-002, etc.)
+  for (let i = 0; i < depositList.length; i++) {
+    const d = depositList[i];
+    const deposit_code = await generateDepositCode(i);
+    const member = memberMap.get(String(d.member_id));
+
     insertRows.push({
       deposit_code,
       member_id: d.member_id,
       for_month: monthFormatted,
       amount_paid: d.amount_paid || 500,
+      deposited_by_name: d.deposited_by_name || null,
       recorded_by_id: adminProfile?.id,
       recorded_by_name: adminName,
       recorded_by_designation: adminDesignation
+    });
+
+    generatedReceipts.push({
+      deposit_code,
+      for_month,
+      amount_paid: d.amount_paid || 500,
+      member_name: member?.full_name || 'Member',
+      member_account_id: member?.account_id || 'N/A',
+      deposited_by_name: d.deposited_by_name || null,
+      recorded_by_name: adminName,
+      recorded_by_designation: adminDesignation,
     });
   }
 
@@ -1241,15 +1272,20 @@ export async function recordBulkDeposits(payload: { for_month: string; deposits:
 
   revalidatePath('/deposits');
   revalidatePath('/members');
-  return { success: `Bulk Deposits Recorded successfully!` };
+
+  return { 
+    success: `Bulk Deposits Recorded (${insertRows.length} Vouchers Generated)!`,
+    receipts: generatedReceipts 
+  };
 }
 
-// 15. ADVANCE FUTURE-MONTH DEPOSITS
+// 15. ADVANCE FUTURE-MONTH DEPOSITS (With Sequential Offset Fix)
 export async function recordAdvanceDeposits(formData: FormData) {
   const member_id = formData.get('member_id') as string;
   const start_month = formData.get('start_month') as string;
   const num_months = Number(formData.get('num_months')) || 1;
   const monthly_amount = Number(formData.get('monthly_amount')) || 500;
+  const deposited_by_name = (formData.get('deposited_by_name') as string)?.trim() || null;
 
   if (!member_id || !start_month || num_months <= 0) return { error: 'Invalid parameters.' };
 
@@ -1279,13 +1315,15 @@ export async function recordAdvanceDeposits(formData: FormData) {
   const adminDesignation = adminProfile?.committee_position || (adminProfile?.role === 'SUPER_ADMIN' ? 'Superadmin' : 'Executive');
 
   const insertRows = [];
-  for (const m of targetMonths) {
-    const deposit_code = await generateDepositCode();
+  for (let i = 0; i < targetMonths.length; i++) {
+    const m = targetMonths[i];
+    const deposit_code = await generateDepositCode(i);
     insertRows.push({
       deposit_code,
       member_id,
       for_month: m,
       amount_paid: monthly_amount,
+      deposited_by_name,
       recorded_by_id: adminProfile?.id,
       recorded_by_name: adminName,
       recorded_by_designation: adminDesignation
