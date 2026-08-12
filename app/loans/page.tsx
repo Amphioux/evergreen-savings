@@ -1,229 +1,170 @@
-import { supabase } from '@/lib/supabase';
-import { issueLoan, recordLoanRepayment } from '@/app/actions';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { getCurrentUserRole } from '@/lib/getUserRole';
-import { Banknote, HandCoins, Eye } from 'lucide-react';
+import LoansTabContainer from './LoansTabContainer';
+import MyLoansLedger from './MyLoansLedger';
+import { createServerClient } from '@supabase/ssr';
+import { cookies } from 'next/headers';
+import { Eye } from 'lucide-react';
 
 export const revalidate = 0;
 
-interface Profile {
-  full_name: string;
-  user_type: string;
-}
-
-interface Loan {
-  id: number;
-  borrower_id: string;
-  principal_amount: number;
-  current_rate: number;
-  issue_date: string;
-  status: string;
-  profiles?: Profile | Profile[] | null;
-}
-
-interface LoanPayment {
-  id: number;
-  loan_id: number;
-  principal_paid: number;
-  interest_paid: number;
-  payment_date: string;
-}
-
 export default async function LoansPage() {
-  const { isAdmin } = await getCurrentUserRole();
+  const cookieStore = await cookies();
+  const supabaseServer = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!.replace(/\/+$/, ''),
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        getAll() {
+          return cookieStore.getAll();
+        },
+      },
+    }
+  );
 
-  const { data: borrowers } = await supabase
+  const { data: { user } } = await supabaseServer.auth.getUser();
+  const currentUserId = user?.id || '';
+  const { isAdmin, isSuperAdmin } = await getCurrentUserRole();
+
+  const { data: profiles } = await supabaseAdmin
     .from('profiles')
-    .select('*')
+    .select('id, full_name, user_type, role, account_id, status')
+    .or('status.eq.ACTIVE,status.is.null')
     .order('full_name');
 
-  const { data: rawLoans } = await supabase
+  const { data: loans } = await supabaseAdmin
     .from('loans')
-    .select('*, profiles(full_name, user_type)')
-    .order('issue_date', { ascending: false });
+    .select('*')
+    .order('issue_date', { ascending: false })
+    .order('id', { ascending: false });
 
-  const { data: rawPayments } = await supabase
+  const { data: payments } = await supabaseAdmin
     .from('loan_payments')
-    .select('*');
+    .select('id, loan_id, payment_code, principal_paid, interest_paid, payment_date, recorded_by_name, recorded_by_email')
+    .order('payment_date', { ascending: false })
+    .order('payment_code', { ascending: false })
+    .order('id', { ascending: false });
 
-  // Explicit type casting to eliminate TypeScript errors
-  const loans: Loan[] = (rawLoans as unknown as Loan[]) || [];
-  const paymentList: LoanPayment[] = (rawPayments as unknown as LoanPayment[]) || [];
-  const activeLoans = loans.filter((l) => l.status === 'ACTIVE');
+  const profileList = profiles || [];
+  const loanList = loans || [];
+  const paymentList = payments || [];
 
-  // Helper function to safely extract borrower details from single or array relation
-  const getBorrowerInfo = (loan: Loan) => {
-    if (!loan.profiles) return { full_name: 'Unknown', user_type: 'MEMBER' };
-    if (Array.isArray(loan.profiles)) {
-      return loan.profiles[0] || { full_name: 'Unknown', user_type: 'MEMBER' };
-    }
-    return loan.profiles;
-  };
+  // Personal loans for the logged-in member
+  const myLoans = loanList.filter(
+    (l: any) => !isAdmin && Boolean(currentUserId) && String(l.borrower_id) === String(currentUserId)
+  );
+
+  // Historical balance calculation
+  const paymentsByLoan: Record<string, typeof paymentList> = {};
+  paymentList.forEach((p) => {
+    const lId = String(p.loan_id);
+    if (!paymentsByLoan[lId]) paymentsByLoan[lId] = [];
+    paymentsByLoan[lId].push(p);
+  });
+
+  const historicalBalances: Record<string, number> = {};
+
+  Object.keys(paymentsByLoan).forEach((lId) => {
+    const loan = loanList.find((l) => String(l.id) === lId);
+    const loanPrincipal = Number(loan?.principal_amount || 0);
+
+    const sortedLoanPayments = [...paymentsByLoan[lId]].sort((a, b) => {
+      const dateDiff = new Date(a.payment_date).getTime() - new Date(b.payment_date).getTime();
+      if (dateDiff !== 0) return dateDiff;
+      return Number(a.id) - Number(b.id);
+    });
+
+    let accumulatedPrincipalPaid = 0;
+    sortedLoanPayments.forEach((p) => {
+      accumulatedPrincipalPaid += Number(p.principal_paid || 0);
+      historicalBalances[String(p.id)] = Math.max(0, loanPrincipal - accumulatedPrincipalPaid);
+    });
+  });
+
+  // Repayment history array
+  const repaymentHistory = paymentList.map((p) => {
+    const loan = loanList.find((l) => String(l.id) === String(p.loan_id));
+    const borrower = profileList.find((b) => b.id === loan?.borrower_id);
+    const guarantor = profileList.find((g) => g.id === loan?.guarantor_id);
+
+    const principal_paid = Number(p.principal_paid) || 0;
+    const interest_paid = Number(p.interest_paid) || 0;
+    const remaining_balance = historicalBalances[String(p.id)] ?? 0;
+
+    return {
+      id: p.id,
+      loan_id: p.loan_id,
+      borrower_id: loan?.borrower_id,
+      payment_code: p.payment_code || `PY-${p.id}`,
+      payment_date: p.payment_date,
+      loan_code: loan?.loan_code || `LN-${p.loan_id}`,
+      current_rate: Number(loan?.current_rate || 12.0),
+      borrower_name: borrower?.full_name || 'Unknown Borrower',
+      borrower_account_id: borrower?.account_id || 'N/A',
+      guarantor_name: guarantor?.full_name,
+      guarantor_account_id: guarantor?.account_id,
+      principal_paid,
+      interest_paid,
+      total_paid: principal_paid + interest_paid,
+      remaining_balance,
+      recorded_by_name: p.recorded_by_name || 'Authorized Admin',
+      recorded_by_email: p.recorded_by_email || '',
+    };
+  });
+
+  // Active loans list for repayments
+  const activeLoanOptions = loanList
+    .filter((l) => l.status === 'ACTIVE')
+    .map((loan) => {
+      const borrower = profileList.find((p) => p.id === loan.borrower_id);
+      const loanPayments = paymentList.filter((p) => String(p.loan_id) === String(loan.id));
+      const totalRepaid = loanPayments.reduce((sum, p) => sum + Number(p.principal_paid || 0), 0);
+      const remaining_balance = Math.max(0, Number(loan.principal_amount || 0) - totalRepaid);
+
+      return {
+        id: loan.id,
+        loan_code: loan.loan_code || `LN-${loan.id}`,
+        borrower_name: borrower?.full_name || 'Unknown Borrower',
+        account_id: borrower?.account_id || 'N/A',
+        remaining_balance,
+        monthly_emi: Number(loan.monthly_emi || 0),
+        current_rate: Number(loan.current_rate || 12.0),
+      };
+    })
+    .filter((l) => l.remaining_balance > 0);
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-8 text-left p-6">
       <div>
-        <h2 className="text-2xl font-bold text-slate-900">Loan Registry & Repayments</h2>
+        <h2 className="text-2xl font-bold text-slate-900 tracking-tight">Loan Management & Repayments</h2>
         <p className="text-sm text-slate-500">
           {isAdmin
-            ? 'Issue member loans (capped at NPR 80,000 @ 12%) and dynamic non-member loans'
-            : 'Read-only directory of active group loans and repayment records'}
+            ? 'Disburse loans with unique Loan IDs, enforce guarantors, and track detailed principal/interest repayments'
+            : 'View your active loan balances, repayment statements, and group loan records'}
         </p>
       </div>
 
       {!isAdmin && (
         <div className="p-3 bg-blue-50 border border-blue-200 text-blue-800 rounded-lg text-xs flex items-center gap-2">
-          <Eye size={16} />
-          <span>You are viewing this ledger in <strong>Member Mode (Read-Only)</strong>.</span>
+          <Eye size={16} className="text-blue-600 flex-shrink-0" />
+          <span>You are viewing loans in <strong>Member Mode (Read-Only)</strong>. Voucher IDs and account numbers for other members are restricted.</span>
         </div>
       )}
 
-      {/* Admin Loan Forms */}
-      {isAdmin && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          
-          {/* Issue New Loan */}
-          <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm space-y-3">
-            <div className="flex items-center gap-2 text-emerald-900 font-bold">
-              <Banknote size={20} />
-              <h3>Issue New Loan</h3>
-            </div>
-            <form action={issueLoan} className="space-y-3">
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Select Borrower *</label>
-                <select name="borrower_id" required className="w-full p-2 border border-slate-300 rounded-lg text-sm bg-white text-slate-900">
-                  <option value="">-- Choose Borrower --</option>
-                  {borrowers?.map((b) => (
-                    <option key={b.id} value={b.id}>
-                      {b.full_name} ({b.user_type === 'MEMBER' ? 'Member - Max 80k' : 'Non-Member'})
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">Principal Amount (NPR) *</label>
-                  <input name="principal_amount" required type="number" placeholder="e.g. 80000" className="w-full p-2 border border-slate-300 rounded-lg text-sm bg-white text-slate-900" />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">Annual Rate (%) *</label>
-                  <input name="current_rate" required type="number" step="0.1" defaultValue={12.0} className="w-full p-2 border border-slate-300 rounded-lg text-sm bg-white text-slate-900" />
-                </div>
-              </div>
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Issue Date *</label>
-                <input name="issue_date" required type="date" defaultValue={new Date().toISOString().split('T')[0]} className="w-full p-2 border border-slate-300 rounded-lg text-sm bg-white text-slate-900" />
-              </div>
-              <button type="submit" className="w-full bg-emerald-900 hover:bg-emerald-800 text-white font-bold text-sm py-2 rounded-lg transition-colors">
-                Disburse Loan Amount
-              </button>
-            </form>
-          </div>
+      {/* MEMBER VIEW: Personal Loans Ledger */}
+      {!isAdmin && <MyLoansLedger myLoans={myLoans} paymentList={paymentList} isAdmin={false} />}
 
-          {/* Record Loan Repayment */}
-          <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm space-y-3">
-            <div className="flex items-center gap-2 text-slate-900 font-bold">
-              <HandCoins size={20} />
-              <h3>Record Loan Installment / Interest</h3>
-            </div>
-            <form action={recordLoanRepayment} className="space-y-3">
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Select Active Loan *</label>
-                <select name="loan_id" required className="w-full p-2 border border-slate-300 rounded-lg text-sm bg-white text-slate-900">
-                  <option value="">-- Choose Active Loan --</option>
-                  {activeLoans.map((l) => {
-                    const info = getBorrowerInfo(l);
-                    return (
-                      <option key={l.id} value={l.id}>
-                        Loan #{l.id} - {info.full_name} (Principal: NPR {l.principal_amount})
-                      </option>
-                    );
-                  })}
-                </select>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">Principal Paid (NPR)</label>
-                  <input name="principal_paid" type="number" defaultValue={0} className="w-full p-2 border border-slate-300 rounded-lg text-sm bg-white text-slate-900" />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">Interest Paid (NPR)</label>
-                  <input name="interest_paid" type="number" defaultValue={0} className="w-full p-2 border border-slate-300 rounded-lg text-sm bg-white text-slate-900" />
-                </div>
-              </div>
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Payment Date *</label>
-                <input name="payment_date" required type="date" defaultValue={new Date().toISOString().split('T')[0]} className="w-full p-2 border border-slate-300 rounded-lg text-sm bg-white text-slate-900" />
-              </div>
-              <button type="submit" className="w-full bg-slate-900 hover:bg-slate-800 text-white font-bold text-sm py-2 rounded-lg transition-colors">
-                Submit Repayment
-              </button>
-            </form>
-          </div>
-
-        </div>
-      )}
-
-      {/* Active Loans Table */}
-      <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-        <div className="p-4 border-b border-slate-200 font-semibold text-slate-800">
-          Active Loans Directory ({loans.length})
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead className="bg-slate-50 text-slate-500 text-xs uppercase font-semibold border-b border-slate-200">
-              <tr>
-                <th className="p-3">Borrower</th>
-                <th className="p-3">Type</th>
-                <th className="p-3">Issue Date</th>
-                <th className="p-3">Months Elapsed</th>
-                <th className="p-3">Rate</th>
-                <th className="p-3">Original Principal</th>
-                <th className="p-3">Remaining Balance</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {loans.map((loan) => {
-                const borrower = getBorrowerInfo(loan);
-                const loanPayments = paymentList.filter((p) => p.loan_id === loan.id);
-                const principalPaid = loanPayments.reduce((sum, p) => sum + Number(p.principal_paid), 0);
-                const remainingBalance = Number(loan.principal_amount) - principalPaid;
-
-                // Calculate Passed Months
-                const issueDate = new Date(loan.issue_date);
-                const today = new Date();
-                const monthsPassed = (today.getFullYear() - issueDate.getFullYear()) * 12 + today.getMonth() - issueDate.getMonth();
-
-                return (
-                  <tr key={loan.id} className="hover:bg-slate-50">
-                    <td className="p-3 font-medium text-slate-900">{borrower.full_name}</td>
-                    <td className="p-3 text-xs">
-                      <span className={`px-2 py-0.5 rounded font-bold ${borrower.user_type === 'MEMBER' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}`}>
-                        {borrower.user_type}
-                      </span>
-                    </td>
-                    <td className="p-3 text-slate-600">{loan.issue_date}</td>
-                    <td className="p-3 font-semibold text-slate-700">
-                      {monthsPassed <= 0 ? 'This Month' : `${monthsPassed} Month(s)`}
-                    </td>
-                    <td className="p-3 font-bold text-emerald-800">{loan.current_rate}%</td>
-                    <td className="p-3 font-mono">NPR {Number(loan.principal_amount).toLocaleString('en-IN')}</td>
-                    <td className="p-3 font-mono font-bold text-slate-900">
-                      NPR {remainingBalance.toLocaleString('en-IN')}
-                    </td>
-                  </tr>
-                );
-              })}
-              {loans.length === 0 && (
-                <tr>
-                  <td colSpan={7} className="p-6 text-center text-slate-400">
-                    No active loans issued yet.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      {/* GROUP LOANS & REPAYMENTS DIRECTORY */}
+      <LoansTabContainer
+        currentUserId={currentUserId}
+        isAdmin={isAdmin}
+        isSuperAdmin={isSuperAdmin}
+        profiles={profileList}
+        loanList={loanList}
+        paymentList={paymentList}
+        activeLoans={activeLoanOptions}
+        repaymentHistory={repaymentHistory}
+      />
     </div>
   );
 }
