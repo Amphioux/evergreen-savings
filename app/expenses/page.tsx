@@ -1,10 +1,11 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { getCurrentUserRole } from '@/lib/getUserRole';
 import RecordExpenseForm from './RecordExpenseForm';
+import EditExpenseModal from './EditExpenseModal';
 import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
-import { Receipt, Eye, UserCheck } from 'lucide-react';
+import { Receipt, Eye } from 'lucide-react';
 
 export const revalidate = 0;
 
@@ -33,14 +34,12 @@ export default async function ExpensesPage() {
 
   const { isAdmin } = await getCurrentUserRole();
 
-  // Fetch active admin profile details to pass into the RecordExpenseForm
   const { data: currentAdminProfile } = await supabaseAdmin
     .from('profiles')
     .select('id, full_name, committee_position, role')
     .eq('id', user.id)
     .single();
 
-  // Fetch expenses directory ordered by date
   const { data: expenses } = await supabaseAdmin
     .from('expenses')
     .select('*')
@@ -88,7 +87,7 @@ export default async function ExpensesPage() {
           </div>
         )}
 
-        {/* Expense Summary & Table */}
+        {/* Expense Summary & Directory */}
         <div className={`space-y-4 ${isAdmin ? 'lg:col-span-2' : 'lg:col-span-3'}`}>
           <div className="p-4 bg-red-50 border border-red-200 rounded-2xl flex items-center justify-between shadow-xs">
             <div className="flex items-center gap-2 text-red-950 font-bold text-xs uppercase tracking-wider">
@@ -116,6 +115,7 @@ export default async function ExpensesPage() {
                     <th className="p-3">Expense Date</th>
                     <th className="p-3">Recorded By</th>
                     <th className="p-3 text-right">Amount Paid</th>
+                    {isAdmin && <th className="p-3 text-center">Action</th>}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -149,13 +149,18 @@ export default async function ExpensesPage() {
                         <td className="p-3 text-right font-mono font-black text-red-700 text-sm">
                           NPR {Number(exp.amount || 0).toLocaleString('en-IN')}
                         </td>
+                        {isAdmin && (
+                          <td className="p-3 text-center">
+                            <EditExpenseModal expense={exp} />
+                          </td>
+                        )}
                       </tr>
                     );
                   })}
 
                   {expenseList.length === 0 && (
                     <tr>
-                      <td colSpan={6} className="p-6 text-center text-slate-400 text-xs font-medium">
+                      <td colSpan={isAdmin ? 7 : 6} className="p-6 text-center text-slate-400 text-xs font-medium">
                         No expense entries recorded in the committee log.
                       </td>
                     </tr>

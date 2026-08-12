@@ -50,6 +50,42 @@ async function getSupabaseServerClient() {
   );
 }
 
+// Helper: Get active editor details for audit trail tracking
+async function getActiveEditorDetails() {
+  const { email } = await getCurrentUserRole();
+  const supabaseServer = await getSupabaseServerClient();
+  const { data: { user } } = await supabaseServer.auth.getUser();
+
+  if (!user) {
+    return { editorId: null, editorName: 'System Admin', editorDesignation: 'Executive Officer', auditUser: 'System Admin' };
+  }
+
+  const { data: profile } = await supabaseAdmin
+    .from('profiles')
+    .select('id, full_name, committee_position, role, account_id')
+    .eq('id', user.id)
+    .single();
+
+  const editorName = profile?.full_name?.replace(/\s*\((Admin|Superadmin)\)/gi, '').trim() || 'System Admin';
+  const editorDesignation = profile?.committee_position || (profile?.role === 'SUPER_ADMIN' ? 'Chairperson / President' : 'Committee Secretary');
+
+  let auditUser = 'System Admin';
+  const rawEmail = email || user.email || '';
+  
+  if (profile?.account_id) {
+    auditUser = `${profile.account_id} - ${editorName}`;
+  } else if (rawEmail) {
+    auditUser = rawEmail.replace('@evergreen.local', '');
+  }
+
+  return { 
+    editorId: profile?.id || user.id, 
+    editorName, 
+    editorDesignation, 
+    auditUser 
+  };
+}
+
 // Helper: Auto-generate sequential Deposit ID (Format: DPYYMM-XXX)
 async function generateDepositCode(offset: number = 0): Promise<string> {
   const now = new Date();
@@ -481,7 +517,7 @@ export async function updatePasswordWithToken(formData: FormData) {
 // 3e. Superadmin Direct Password Override
 export async function resetUserPasswordBySuperAdmin(formData: FormData) {
   try {
-    const { isSuperAdmin, email: adminEmail } = await getCurrentUserRole();
+    const { isSuperAdmin } = await getCurrentUserRole();
     if (!isSuperAdmin) return { error: 'Unauthorized: Superadmin access required.' };
 
     const userId = formData.get('user_id') as string;
@@ -493,6 +529,8 @@ export async function resetUserPasswordBySuperAdmin(formData: FormData) {
     if (passwordError) {
       return { error: passwordError };
     }
+
+    const { auditUser } = await getActiveEditorDetails();
 
     const { data: profile } = await supabaseAdmin
       .from('profiles')
@@ -513,7 +551,7 @@ export async function resetUserPasswordBySuperAdmin(formData: FormData) {
       old_value: { account_id: profile?.account_id },
       new_value: { password_changed: true },
       reason: 'Manual password override by Superadmin',
-      changed_by_email: adminEmail || 'Superadmin',
+      changed_by_email: auditUser,
     }]);
 
     revalidatePath('/users');
@@ -823,7 +861,7 @@ export async function registerSuperAdminBySuperAdmin(formData: FormData) {
 // 7. Update Admin Committee Position
 export async function updateAdminPosition(formData: FormData) {
   try {
-    const { isSuperAdmin, email: adminEmail } = await getCurrentUserRole();
+    const { isSuperAdmin } = await getCurrentUserRole();
     if (!isSuperAdmin) return { error: 'Unauthorized: Only Superadmins can reassign committee positions.' };
 
     const userId = formData.get('user_id') as string;
@@ -832,6 +870,8 @@ export async function updateAdminPosition(formData: FormData) {
     const reason = (formData.get('reason') as string)?.trim() || 'Executive Committee re-election';
 
     if (!userId || !newPosition) return { error: 'Admin User ID and New Position are required.' };
+
+    const { auditUser } = await getActiveEditorDetails();
 
     const { data: currentProfile } = await supabaseAdmin
       .from('profiles')
@@ -866,7 +906,7 @@ export async function updateAdminPosition(formData: FormData) {
         account_id: currentProfile.account_id 
       },
       reason,
-      changed_by_email: adminEmail || 'Superadmin'
+      changed_by_email: auditUser
     }]);
 
     revalidatePath('/users');
@@ -877,10 +917,10 @@ export async function updateAdminPosition(formData: FormData) {
   }
 }
 
-// 8. Update Admin Profile Details
+// 8. Update Admin Profile Details (Preserves Creator + Captures Last Changed By Audit)
 export async function updateAdminProfileDetails(formData: FormData) {
   try {
-    const { isSuperAdmin, email: adminEmail } = await getCurrentUserRole();
+    const { isSuperAdmin } = await getCurrentUserRole();
     if (!isSuperAdmin) return { error: 'Unauthorized: Superadmin access required.' };
 
     const userId = formData.get('user_id') as string;
@@ -892,13 +932,17 @@ export async function updateAdminProfileDetails(formData: FormData) {
 
     if (!userId || !full_name) return { error: 'User ID and Full Name are required.' };
 
+    const { editorName, editorDesignation, auditUser } = await getActiveEditorDetails();
+
     const { data: oldProfile } = await supabaseAdmin.from('profiles').select('*').eq('id', userId).single();
+    if (!oldProfile) return { error: 'Admin profile record not found.' };
 
     const updateFields: any = {
       full_name,
       phone: phone || null,
       email: email || oldProfile?.email,
       committee_position: committee_position || oldProfile?.committee_position,
+      updated_at: new Date().toISOString(),
     };
 
     if (joined_date) {
@@ -920,15 +964,26 @@ export async function updateAdminProfileDetails(formData: FormData) {
         full_name: oldProfile?.full_name, 
         phone: oldProfile?.phone, 
         email: oldProfile?.email,
+        committee_position: oldProfile?.committee_position,
         joined_date: oldProfile?.joined_date 
       },
-      new_value: { full_name, phone, email, joined_date },
-      reason: 'Admin details and appointment date updated via Access Control panel',
-      changed_by_email: adminEmail || 'Superadmin'
+      new_value: { 
+        full_name, 
+        phone, 
+        email, 
+        committee_position, 
+        joined_date,
+        last_changed_by: `${editorName} (${editorDesignation})`
+      },
+      reason: `Admin details updated by ${editorName} (${editorDesignation})`,
+      changed_by_email: auditUser
     }]);
 
     revalidatePath('/users');
-    return { success: 'Admin profile and appointment date updated successfully!' };
+    revalidatePath('/members');
+    revalidatePath('/admin/user-lookup');
+    revalidatePath('/');
+    return { success: 'Admin profile and appointment details updated successfully!' };
   } catch (err: any) {
     return { error: err.message || 'Failed to update profile.' };
   }
@@ -937,7 +992,7 @@ export async function updateAdminProfileDetails(formData: FormData) {
 // 9. Deactivate/Offboard Admin Account
 export async function deactivateAdminAccount(formData: FormData) {
   try {
-    const { isSuperAdmin, email: adminEmail } = await getCurrentUserRole();
+    const { isSuperAdmin } = await getCurrentUserRole();
     if (!isSuperAdmin) return { error: 'Unauthorized: Superadmin access required.' };
 
     const userId = formData.get('user_id') as string;
@@ -945,6 +1000,7 @@ export async function deactivateAdminAccount(formData: FormData) {
 
     if (!userId) return { error: 'User ID is required.' };
 
+    const { auditUser } = await getActiveEditorDetails();
     const { data: admin } = await supabaseAdmin.from('profiles').select('full_name, account_id').eq('id', userId).single();
 
     const { error } = await supabaseAdmin
@@ -965,7 +1021,7 @@ export async function deactivateAdminAccount(formData: FormData) {
       old_value: { status: 'ACTIVE', account_id: admin?.account_id },
       new_value: { status: 'INACTIVE', deactivation_reason },
       reason: deactivation_reason,
-      changed_by_email: adminEmail || 'Superadmin'
+      changed_by_email: auditUser
     }]);
 
     revalidatePath('/users');
@@ -978,13 +1034,15 @@ export async function deactivateAdminAccount(formData: FormData) {
 // 10. Reactivate Admin Account
 export async function reactivateAdminAccount(formData: FormData) {
   try {
-    const { isSuperAdmin, email: adminEmail } = await getCurrentUserRole();
+    const { isSuperAdmin } = await getCurrentUserRole();
     if (!isSuperAdmin) return { error: 'Unauthorized: Superadmin access required.' };
 
     const userId = formData.get('user_id') as string;
     const reason = (formData.get('reason') as string)?.trim() || 'Reappointed to Executive Board';
 
     if (!userId) return { error: 'User ID is required.' };
+
+    const { auditUser } = await getActiveEditorDetails();
 
     const { data: admin } = await supabaseAdmin
       .from('profiles')
@@ -1010,7 +1068,7 @@ export async function reactivateAdminAccount(formData: FormData) {
       old_value: { status: 'INACTIVE', account_id: admin?.account_id },
       new_value: { status: 'ACTIVE', reason },
       reason,
-      changed_by_email: adminEmail || 'Superadmin'
+      changed_by_email: auditUser
     }]);
 
     revalidatePath('/users');
@@ -1022,129 +1080,163 @@ export async function reactivateAdminAccount(formData: FormData) {
 
 // 11. Comprehensive Member Profile Update Action
 export async function updateUserProfile(formData: FormData) {
-  const userId = formData.get('user_id') as string;
-  const full_name = (formData.get('full_name') as string)?.trim();
-  const phone = (formData.get('phone') as string)?.trim();
-  const email = (formData.get('email') as string)?.trim()?.toLowerCase();
-  const role = formData.get('role') as string;
-  const committee_position = (formData.get('committee_position') as string)?.trim() || null;
-  const joined_date = formData.get('joined_date') as string;
+  try {
+    const userId = formData.get('user_id') as string;
+    const full_name = (formData.get('full_name') as string)?.trim();
+    const phone = (formData.get('phone') as string)?.trim();
+    const email = (formData.get('email') as string)?.trim()?.toLowerCase();
+    const role = formData.get('role') as string;
+    const committee_position = (formData.get('committee_position') as string)?.trim() || null;
+    const joined_date = formData.get('joined_date') as string;
 
-  const dob = (formData.get('dob') as string) || null;
-  const gender = (formData.get('gender') as string) || null;
-  const marital_status = (formData.get('marital_status') as string) || null;
-  const father_name = (formData.get('father_name') as string)?.trim() || null;
-  const grandfather_name = (formData.get('grandfather_name') as string)?.trim() || null;
-  const spouse_name = (formData.get('spouse_name') as string)?.trim() || null;
-  const occupation = (formData.get('occupation') as string)?.trim() || null;
+    const dob = (formData.get('dob') as string) || null;
+    const gender = (formData.get('gender') as string) || null;
+    const marital_status = (formData.get('marital_status') as string) || null;
+    const father_name = (formData.get('father_name') as string)?.trim() || null;
+    const grandfather_name = (formData.get('grandfather_name') as string)?.trim() || null;
+    const spouse_name = (formData.get('spouse_name') as string)?.trim() || null;
+    const occupation = (formData.get('occupation') as string)?.trim() || null;
 
-  const citizenship_no = (formData.get('citizenship_no') as string)?.trim() || null;
-  const nid_no = (formData.get('nid_no') as string)?.trim() || null;
-  const citizenship_issue_date = (formData.get('citizenship_issue_date') as string) || null;
-  const citizenship_issue_district = (formData.get('citizenship_issue_district') as string)?.trim() || null;
+    const citizenship_no = (formData.get('citizenship_no') as string)?.trim() || null;
+    const nid_no = (formData.get('nid_no') as string)?.trim() || null;
+    const citizenship_issue_date = (formData.get('citizenship_issue_date') as string) || null;
+    const citizenship_issue_district = (formData.get('citizenship_issue_district') as string)?.trim() || null;
 
-  const municipality_vdc = (formData.get('municipality_vdc') as string)?.trim() || null;
-  const ward_no = formData.get('ward_no') ? Number(formData.get('ward_no')) : null;
-  const village_name = (formData.get('village_name') as string)?.trim() || null;
+    const municipality_vdc = (formData.get('municipality_vdc') as string)?.trim() || null;
+    const ward_no = formData.get('ward_no') ? Number(formData.get('ward_no')) : null;
+    const village_name = (formData.get('village_name') as string)?.trim() || null;
 
-  const photo_file = (formData.get('photo') || formData.get('profile_photo')) as File | null;
-  const kyc_file = formData.get('kyc_document') as File | null;
+    const photo_file = (formData.get('photo') || formData.get('profile_photo')) as File | null;
+    const kyc_file = formData.get('kyc_document') as File | null;
 
-  if (!userId || !full_name) {
-    return { error: 'User ID and Full Name are required.' };
-  }
-
-  const { isAdmin, isSuperAdmin } = await getCurrentUserRole();
-  if (!isAdmin) {
-    return { error: 'Unauthorized: Only Committee Admins can update member profiles.' };
-  }
-
-  const { data: currentProfile } = await supabaseAdmin
-    .from('profiles')
-    .select('account_id, photo_path, kyc_document_path')
-    .eq('id', userId)
-    .single();
-
-  const accountId = currentProfile?.account_id || 'ACC';
-  const timestamp = Date.now();
-
-  let photo_path = currentProfile?.photo_path || null;
-  let kyc_document_path = currentProfile?.kyc_document_path || null;
-
-  if (photo_file && photo_file.size > 0) {
-    if (photo_file.size > 1048576) {
-      return { error: 'Profile Photo Error: Image exceeds 1 MB size limit.' };
+    if (!userId || !full_name) {
+      return { error: 'User ID and Full Name are required.' };
     }
-    const rawExt = photo_file.name.split('.').pop()?.toLowerCase() || 'jpg';
-    const ext = ['jpg', 'jpeg', 'png'].includes(rawExt) ? rawExt : 'jpg';
-    const photoFileName = `photos/${accountId}_photo_${timestamp}.${ext}`;
 
-    const { data: uploadData, error: uploadErr } = await supabaseAdmin.storage
-      .from('member-docs')
-      .upload(photoFileName, photo_file, { contentType: photo_file.type, upsert: true });
-
-    if (!uploadErr && uploadData) {
-      photo_path = uploadData.path;
+    const { isAdmin, isSuperAdmin } = await getCurrentUserRole();
+    if (!isAdmin) {
+      return { error: 'Unauthorized: Only Committee Admins can update member profiles.' };
     }
+
+    const { editorName, editorDesignation, auditUser } = await getActiveEditorDetails();
+
+    const { data: oldProfile } = await supabaseAdmin
+      .from('profiles')
+      .select('*')
+      .eq('id', userId)
+      .single();
+
+    if (!oldProfile) return { error: 'Member profile record not found.' };
+
+    const accountId = oldProfile.account_id || 'ACC';
+    const timestamp = Date.now();
+
+    let photo_path = oldProfile.photo_path || null;
+    let kyc_document_path = oldProfile.kyc_document_path || null;
+
+    if (photo_file && photo_file.size > 0) {
+      if (photo_file.size > 1048576) {
+        return { error: 'Profile Photo Error: Image exceeds 1 MB size limit.' };
+      }
+      const rawExt = photo_file.name.split('.').pop()?.toLowerCase() || 'jpg';
+      const ext = ['jpg', 'jpeg', 'png'].includes(rawExt) ? rawExt : 'jpg';
+      const photoFileName = `photos/${accountId}_photo_${timestamp}.${ext}`;
+
+      const { data: uploadData, error: uploadErr } = await supabaseAdmin.storage
+        .from('member-docs')
+        .upload(photoFileName, photo_file, { contentType: photo_file.type, upsert: true });
+
+      if (!uploadErr && uploadData) {
+        photo_path = uploadData.path;
+      }
+    }
+
+    if (kyc_file && kyc_file.size > 0) {
+      if (kyc_file.size > 1048576) {
+        return { error: 'KYC Document Error: File exceeds 1 MB size limit.' };
+      }
+      if (kyc_file.type !== 'application/pdf') {
+        return { error: 'KYC Document Error: File must be in PDF format.' };
+      }
+      const kycFileName = `kyc/${accountId}_kyc_${timestamp}.pdf`;
+
+      const { data: uploadData, error: uploadErr } = await supabaseAdmin.storage
+        .from('member-docs')
+        .upload(kycFileName, kyc_file, { contentType: 'application/pdf', upsert: true });
+
+      if (!uploadErr && uploadData) {
+        kyc_document_path = uploadData.path;
+      }
+    }
+
+    const updateData: any = {
+      full_name,
+      phone: phone || null,
+      committee_position,
+      dob,
+      gender,
+      marital_status,
+      father_name,
+      grandfather_name,
+      spouse_name,
+      occupation,
+      citizenship_no,
+      nid_no,
+      citizenship_issue_date,
+      citizenship_issue_district,
+      municipality_vdc,
+      ward_no,
+      village_name,
+      photo_path,
+      kyc_document_path,
+      updated_at: new Date().toISOString(),
+    };
+
+    if (joined_date) updateData.joined_date = joined_date;
+    if (email) updateData.email = email;
+
+    if (isSuperAdmin && role) {
+      updateData.role = role;
+    }
+
+    const { error } = await supabaseAdmin.from('profiles').update(updateData).eq('id', userId);
+
+    if (error) return { error: error.message };
+
+    await supabaseAdmin.from('audit_logs').insert([{
+      entity_type: 'MEMBER_PROFILE',
+      entity_id: userId,
+      action: 'MEMBER_PROFILE_EDITED',
+      old_value: {
+        full_name: oldProfile.full_name,
+        phone: oldProfile.phone,
+        email: oldProfile.email,
+        citizenship_no: oldProfile.citizenship_no,
+        nid_no: oldProfile.nid_no,
+        joined_date: oldProfile.joined_date,
+      },
+      new_value: { 
+        full_name, 
+        phone, 
+        email, 
+        citizenship_no, 
+        nid_no, 
+        joined_date,
+        last_changed_by: `${editorName} (${editorDesignation})`
+      },
+      reason: `Member profile dossier corrected by ${editorName} (${editorDesignation})`,
+      changed_by_email: auditUser,
+    }]);
+
+    revalidatePath('/members');
+    revalidatePath('/users');
+    revalidatePath('/loans');
+    revalidatePath('/admin/user-lookup');
+    revalidatePath('/');
+    return { success: `Profile for ${full_name} (${accountId}) updated successfully!` };
+  } catch (err: any) {
+    return { error: err.message || 'Failed to update member profile.' };
   }
-
-  if (kyc_file && kyc_file.size > 0) {
-    if (kyc_file.size > 1048576) {
-      return { error: 'KYC Document Error: File exceeds 1 MB size limit.' };
-    }
-    if (kyc_file.type !== 'application/pdf') {
-      return { error: 'KYC Document Error: File must be in PDF format.' };
-    }
-    const kycFileName = `kyc/${accountId}_kyc_${timestamp}.pdf`;
-
-    const { data: uploadData, error: uploadErr } = await supabaseAdmin.storage
-      .from('member-docs')
-      .upload(kycFileName, kyc_file, { contentType: 'application/pdf', upsert: true });
-
-    if (!uploadErr && uploadData) {
-      kyc_document_path = uploadData.path;
-    }
-  }
-
-  const updateData: any = {
-    full_name,
-    phone: phone || null,
-    committee_position,
-    dob,
-    gender,
-    marital_status,
-    father_name,
-    grandfather_name,
-    spouse_name,
-    occupation,
-    citizenship_no,
-    nid_no,
-    citizenship_issue_date,
-    citizenship_issue_district,
-    municipality_vdc,
-    ward_no,
-    village_name,
-    photo_path,
-    kyc_document_path,
-  };
-
-  if (joined_date) updateData.joined_date = joined_date;
-  if (email) updateData.email = email;
-
-  if (isSuperAdmin && role) {
-    updateData.role = role;
-  }
-
-  const { error } = await supabaseAdmin.from('profiles').update(updateData).eq('id', userId);
-
-  if (error) return { error: error.message };
-
-  revalidatePath('/members');
-  revalidatePath('/users');
-  revalidatePath('/loans');
-  revalidatePath('/admin/user-lookup');
-  revalidatePath('/');
-  return { success: 'Member profile updated successfully!' };
 }
 
 // 12. Settlement & Deactivation Action
@@ -1159,10 +1251,12 @@ export async function settleAndDeactivateMember(formData: FormData) {
     return { error: 'User ID is required.' };
   }
 
-  const { isAdmin, email: adminEmail } = await getCurrentUserRole();
+  const { isAdmin } = await getCurrentUserRole();
   if (!isAdmin) {
     return { error: 'Unauthorized: Only Committee Admins can deactivate accounts.' };
   }
+
+  const { auditUser } = await getActiveEditorDetails();
 
   const { data: member } = await supabaseAdmin
     .from('profiles')
@@ -1207,7 +1301,7 @@ export async function settleAndDeactivateMember(formData: FormData) {
       net_refund: netRefundPaid 
     },
     reason: fullNotes,
-    changed_by_email: adminEmail || 'System Admin'
+    changed_by_email: auditUser
   }]);
 
   revalidatePath('/members');
@@ -1244,16 +1338,7 @@ export async function recordDeposit(formData: FormData) {
     return { error: `Duplicate Entry: Deposit already exists for ${formatMonthLabel(for_month)}.` };
   }
 
-  const supabaseServer = await getSupabaseServerClient();
-  const { data: { user } } = await supabaseServer.auth.getUser();
-  const { data: adminProfile } = await supabaseAdmin
-    .from('profiles')
-    .select('id, full_name, committee_position, role')
-    .eq('id', user?.id)
-    .single();
-
-  const adminName = adminProfile?.full_name?.replace(/\s*\((Admin|Superadmin)\)/gi, '').trim() || 'System Admin';
-  const adminDesignation = adminProfile?.committee_position || (adminProfile?.role === 'SUPER_ADMIN' ? 'Chairperson / President' : 'Committee Secretary');
+  const { editorId, editorName, editorDesignation } = await getActiveEditorDetails();
 
   const deposit_code = await generateDepositCode(0);
 
@@ -1265,9 +1350,9 @@ export async function recordDeposit(formData: FormData) {
       for_month: formattedMonth,
       amount_paid,
       deposited_by_name,
-      recorded_by_id: adminProfile?.id,
-      recorded_by_name: adminName,
-      recorded_by_designation: adminDesignation
+      recorded_by_id: editorId,
+      recorded_by_name: editorName,
+      recorded_by_designation: editorDesignation
     }])
     .select('*, profiles!member_id(full_name, account_id)')
     .single();
@@ -1288,8 +1373,8 @@ export async function recordDeposit(formData: FormData) {
       member_name: newDep.profiles?.full_name || 'Member',
       member_account_id: newDep.profiles?.account_id || 'N/A',
       deposited_by_name,
-      recorded_by_name: adminName,
-      recorded_by_designation: adminDesignation,
+      recorded_by_name: editorName,
+      recorded_by_designation: editorDesignation,
     }
   };
 }
@@ -1318,16 +1403,7 @@ export async function recordBulkDeposits(payload: {
     return { error: 'Bulk Deposit Error: One or more selected members have already paid for this month.' };
   }
 
-  const supabaseServer = await getSupabaseServerClient();
-  const { data: { user } } = await supabaseServer.auth.getUser();
-  const { data: adminProfile } = await supabaseAdmin
-    .from('profiles')
-    .select('id, full_name, committee_position, role')
-    .eq('id', user?.id)
-    .single();
-
-  const adminName = adminProfile?.full_name?.replace(/\s*\((Admin|Superadmin)\)/gi, '').trim() || 'System Admin';
-  const adminDesignation = adminProfile?.committee_position || (adminProfile?.role === 'SUPER_ADMIN' ? 'Chairperson / President' : 'Committee Secretary');
+  const { editorId, editorName, editorDesignation } = await getActiveEditorDetails();
 
   const { data: memberProfiles } = await supabaseAdmin
     .from('profiles')
@@ -1350,9 +1426,9 @@ export async function recordBulkDeposits(payload: {
       for_month: monthFormatted,
       amount_paid: d.amount_paid || 500,
       deposited_by_name: d.deposited_by_name || null,
-      recorded_by_id: adminProfile?.id,
-      recorded_by_name: adminName,
-      recorded_by_designation: adminDesignation
+      recorded_by_id: editorId,
+      recorded_by_name: editorName,
+      recorded_by_designation: editorDesignation
     });
 
     generatedReceipts.push({
@@ -1362,8 +1438,8 @@ export async function recordBulkDeposits(payload: {
       member_name: member?.full_name || 'Member',
       member_account_id: member?.account_id || 'N/A',
       deposited_by_name: d.deposited_by_name || null,
-      recorded_by_name: adminName,
-      recorded_by_designation: adminDesignation,
+      recorded_by_name: editorName,
+      recorded_by_designation: editorDesignation,
     });
   }
 
@@ -1403,16 +1479,7 @@ export async function recordAdvanceDeposits(formData: FormData) {
     if (currentMonth > 12) { currentMonth = 1; currentYear++; }
   }
 
-  const supabaseServer = await getSupabaseServerClient();
-  const { data: { user } } = await supabaseServer.auth.getUser();
-  const { data: adminProfile } = await supabaseAdmin
-    .from('profiles')
-    .select('id, full_name, committee_position, role')
-    .eq('id', user?.id)
-    .single();
-
-  const adminName = adminProfile?.full_name?.replace(/\s*\((Admin|Superadmin)\)/gi, '').trim() || 'System Admin';
-  const adminDesignation = adminProfile?.committee_position || (adminProfile?.role === 'SUPER_ADMIN' ? 'Chairperson / President' : 'Committee Secretary');
+  const { editorId, editorName, editorDesignation } = await getActiveEditorDetails();
 
   const insertRows = [];
   for (let i = 0; i < targetMonths.length; i++) {
@@ -1424,9 +1491,9 @@ export async function recordAdvanceDeposits(formData: FormData) {
       for_month: m,
       amount_paid: monthly_amount,
       deposited_by_name,
-      recorded_by_id: adminProfile?.id,
-      recorded_by_name: adminName,
-      recorded_by_designation: adminDesignation
+      recorded_by_id: editorId,
+      recorded_by_name: editorName,
+      recorded_by_designation: editorDesignation
     });
   }
 
@@ -1444,18 +1511,7 @@ export async function issueLoan(formData: FormData) {
     const { isAdmin } = await getCurrentUserRole();
     if (!isAdmin) return { error: 'Unauthorized: Admins only.' };
 
-    const supabaseServer = await getSupabaseServerClient();
-    const { data: { user } } = await supabaseServer.auth.getUser();
-
-    if (!user) return { error: 'Unauthorized: Active session required.' };
-
-    const { data: currentAdmin } = await supabaseAdmin
-      .from('profiles')
-      .select('id, full_name, committee_position, role')
-      .eq('id', user.id)
-      .single();
-
-    if (!currentAdmin) return { error: 'Admin profile record not found.' };
+    const { editorId, editorName, editorDesignation } = await getActiveEditorDetails();
 
     const borrower_id = formData.get('borrower_id') as string;
     const guarantor_id = (formData.get('guarantor_id') as string) || null;
@@ -1536,9 +1592,6 @@ export async function issueLoan(formData: FormData) {
     const N = tenure_months;
     const monthly_emi = R === 0 ? Math.round(principal_amount / N) : Math.round((principal_amount * R * Math.pow(1 + R, N)) / (Math.pow(1 + R, N) - 1));
 
-    const adminName = currentAdmin.full_name?.replace(/\s*\((Admin|Superadmin)\)/gi, '').trim() || 'System Admin';
-    const adminDesignation = currentAdmin.committee_position || (currentAdmin.role === 'SUPER_ADMIN' ? 'Chairperson / President' : 'Committee Secretary');
-
     const { data: loan, error: insertError } = await supabaseAdmin.from('loans').insert([
       {
         loan_code,
@@ -1551,9 +1604,9 @@ export async function issueLoan(formData: FormData) {
         issue_date,
         status: 'ACTIVE',
         application_doc_path: storageFileName,
-        approved_by_id: currentAdmin.id,
-        approved_by_name: adminName,
-        approved_by_designation: adminDesignation,
+        approved_by_id: editorId,
+        approved_by_name: editorName,
+        approved_by_designation: editorDesignation,
       },
     ]).select().single();
 
@@ -1585,19 +1638,10 @@ export async function recordLoanRepayment(formData: FormData) {
   if (!loan_id || !payment_date) return { error: 'Loan and date required.' };
   if (principal_paid <= 0 && interest_paid <= 0) return { error: 'Invalid amounts.' };
 
-  const { isAdmin, email: adminEmail } = await getCurrentUserRole();
+  const { isAdmin } = await getCurrentUserRole();
   if (!isAdmin) return { error: 'Unauthorized.' };
 
-  const supabaseServer = await getSupabaseServerClient();
-  const { data: { user } } = await supabaseServer.auth.getUser();
-  const { data: adminProfile } = await supabaseAdmin
-    .from('profiles')
-    .select('id, full_name, committee_position, role')
-    .eq('id', user?.id)
-    .single();
-
-  const adminName = adminProfile?.full_name?.replace(/\s*\((Admin|Superadmin)\)/gi, '').trim() || 'System Admin';
-  const adminDesignation = adminProfile?.committee_position || (adminProfile?.role === 'SUPER_ADMIN' ? 'Chairperson / President' : 'Committee Secretary');
+  const { editorId, editorName, editorDesignation, auditUser } = await getActiveEditorDetails();
 
   const payment_code = await generatePaymentCode();
 
@@ -1609,10 +1653,10 @@ export async function recordLoanRepayment(formData: FormData) {
       principal_paid,
       interest_paid,
       payment_date,
-      recorded_by_id: adminProfile?.id,
-      recorded_by_name: adminName,
-      recorded_by_designation: adminDesignation,
-      recorded_by_email: adminEmail || null,
+      recorded_by_id: editorId,
+      recorded_by_name: editorName,
+      recorded_by_designation: editorDesignation,
+      recorded_by_email: auditUser || null,
     }])
     .select()
     .single();
@@ -1638,8 +1682,8 @@ export async function recordLoanRepayment(formData: FormData) {
       principal_paid,
       interest_paid,
       total_paid: principal_paid + interest_paid,
-      recorded_by_name: adminName,
-      recorded_by_designation: adminDesignation,
+      recorded_by_name: editorName,
+      recorded_by_designation: editorDesignation,
     },
   };
 }
@@ -1673,47 +1717,211 @@ export async function getLoanDocSignedUrl(filePath: string) {
 
 // 19. Record Bank Interest Credit
 export async function recordBankInterest(formData: FormData) {
-  const amount = Number(formData.get('amount'));
-  const credit_date = formData.get('credit_date') as string;
-  const notes = formData.get('notes') as string;
+  try {
+    const amount = Number(formData.get('amount'));
+    const credit_date = formData.get('credit_date') as string;
+    const notes = (formData.get('notes') as string)?.trim() || null;
 
-  if (!amount || !credit_date) return;
+    if (!amount || amount <= 0 || !credit_date) {
+      return { error: 'Valid positive amount and credit date are required.' };
+    }
 
-  await supabaseAdmin.from('bank_interest').insert([{
-    amount,
-    credit_date,
-    notes: notes || null
-  }]);
+    const { isAdmin } = await getCurrentUserRole();
+    if (!isAdmin) return { error: 'Unauthorized: Admins only.' };
 
-  revalidatePath('/treasury');
-  revalidatePath('/');
+    const { editorId, editorName, editorDesignation, auditUser } = await getActiveEditorDetails();
+
+    const { data: record, error } = await supabaseAdmin
+      .from('bank_interest')
+      .insert([{
+        amount,
+        credit_date,
+        notes,
+        recorded_by_id: editorId,
+        recorded_by_name: editorName,
+        recorded_by_designation: editorDesignation
+      }])
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Supabase Bank Interest Insert Error:', error);
+      return { error: `Database Error: ${error.message}` };
+    }
+
+    await supabaseAdmin.from('audit_logs').insert([{
+      entity_type: 'BANK_INTEREST',
+      entity_id: String(record.id),
+      action: 'BANK_INTEREST_RECORDED',
+      new_value: { amount, credit_date, notes, recorded_by: `${editorName} (${editorDesignation})` },
+      reason: notes || 'Bank Interest Credited',
+      changed_by_email: auditUser
+    }]);
+
+    revalidatePath('/treasury');
+    revalidatePath('/');
+    return { success: `Bank interest credit of NPR ${amount.toLocaleString('en-IN')} recorded successfully!` };
+  } catch (err: any) {
+    console.error('Record Bank Interest Exception:', err);
+    return { error: err.message || 'Failed to record bank interest.' };
+  }
 }
 
-// 20. Record Assets
+// 19b. UPDATE BANK INTEREST RECORD (Preserves Original Creator + Logs Edit)
+export async function updateBankInterest(formData: FormData) {
+  try {
+    const interest_id = Number(formData.get('interest_id'));
+    const amount = Number(formData.get('amount'));
+    const credit_date = formData.get('credit_date') as string;
+    const notes = (formData.get('notes') as string)?.trim() || null;
+
+    if (!interest_id || !amount || amount <= 0 || !credit_date) {
+      return { error: 'ID, valid positive amount, and credit date are required.' };
+    }
+
+    const { isAdmin } = await getCurrentUserRole();
+    if (!isAdmin) return { error: 'Unauthorized: Admins only.' };
+
+    const { editorName, editorDesignation, auditUser } = await getActiveEditorDetails();
+
+    const { data: oldRecord } = await supabaseAdmin.from('bank_interest').select('*').eq('id', interest_id).single();
+    if (!oldRecord) return { error: 'Record not found.' };
+
+    const { error } = await supabaseAdmin.from('bank_interest').update({
+      amount, credit_date, notes
+    }).eq('id', interest_id);
+
+    if (error) return { error: error.message };
+
+    await supabaseAdmin.from('audit_logs').insert([{
+      entity_type: 'BANK_INTEREST',
+      entity_id: String(interest_id),
+      action: 'BANK_INTEREST_EDITED',
+      old_value: { amount: oldRecord.amount, credit_date: oldRecord.credit_date, notes: oldRecord.notes },
+      new_value: { amount, credit_date, notes, last_changed_by: `${editorName} (${editorDesignation})` },
+      reason: `Bank interest entry modified by ${editorName} (${editorDesignation})`,
+      changed_by_email: auditUser
+    }]);
+
+    revalidatePath('/treasury');
+    revalidatePath('/');
+    return { success: 'Bank interest record updated successfully!' };
+  } catch (err: any) {
+    return { error: err.message || 'Failed to update record.' };
+  }
+}
+
+// 20. Record Property / Treasury Asset
 export async function recordAsset(formData: FormData) {
-  const asset_name = formData.get('asset_name') as string;
-  const asset_type = formData.get('asset_type') as string;
-  const purchase_price = Number(formData.get('purchase_price'));
-  const current_value = Number(formData.get('current_value')) || purchase_price;
-  const purchase_date = formData.get('purchase_date') as string;
-  const notes = formData.get('notes') as string;
+  try {
+    const asset_name = (formData.get('asset_name') as string)?.trim();
+    const asset_type = (formData.get('asset_type') as string)?.toUpperCase() || 'LAND';
+    const purchase_price = Number(formData.get('purchase_price')) || 0;
+    
+    // Safely evaluate current_value: fallback to purchase_price if missing or 0
+    const rawCurrentVal = formData.get('current_value');
+    const current_value = rawCurrentVal && Number(rawCurrentVal) > 0 
+      ? Number(rawCurrentVal) 
+      : purchase_price;
 
-  if (!asset_name || !purchase_price || !purchase_date) return;
+    const purchase_date = formData.get('purchase_date') as string;
+    const notes = (formData.get('notes') as string)?.trim() || null;
 
-  await supabaseAdmin.from('assets').insert([{
-    asset_name,
-    asset_type,
-    purchase_price,
-    current_value,
-    purchase_date,
-    notes: notes || null
-  }]);
+    if (!asset_name || purchase_price <= 0 || !purchase_date) {
+      return { error: 'Asset name, valid purchase price, and purchase date are required.' };
+    }
 
-  revalidatePath('/treasury');
-  revalidatePath('/');
+    const { isAdmin } = await getCurrentUserRole();
+    if (!isAdmin) return { error: 'Unauthorized: Admins only.' };
+
+    const { editorId, editorName, editorDesignation, auditUser } = await getActiveEditorDetails();
+
+    const { data: asset, error } = await supabaseAdmin
+      .from('assets')
+      .insert([{
+        asset_name,
+        asset_type,
+        purchase_price,
+        current_value,
+        purchase_date,
+        notes,
+        recorded_by_id: editorId,
+        recorded_by_name: editorName,
+        recorded_by_designation: editorDesignation
+      }])
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Supabase Asset Insert Error:', error);
+      return { error: `Database Error: ${error.message}` };
+    }
+
+    await supabaseAdmin.from('audit_logs').insert([{
+      entity_type: 'ASSET',
+      entity_id: String(asset.id),
+      action: 'ASSET_RECORDED',
+      new_value: { asset_name, asset_type, purchase_price, current_value, purchase_date, recorded_by: `${editorName} (${editorDesignation})` },
+      reason: notes || 'New Property Asset Registered',
+      changed_by_email: auditUser
+    }]);
+
+    revalidatePath('/treasury');
+    revalidatePath('/');
+    return { success: `Property asset "${asset_name}" registered successfully with valuation NPR ${current_value.toLocaleString('en-IN')}!` };
+  } catch (err: any) {
+    console.error('Record Asset Exception:', err);
+    return { error: err.message || 'Failed to record asset.' };
+  }
 }
 
-// 21. Record Committee Expense
+// 20b. UPDATE PROPERTY ASSET DETAILS (Preserves Valuation, Edits Metadata)
+export async function updateAsset(formData: FormData) {
+  try {
+    const asset_id = Number(formData.get('asset_id'));
+    const asset_name = (formData.get('asset_name') as string)?.trim();
+    const asset_type = formData.get('asset_type') as string;
+    const purchase_price = Number(formData.get('purchase_price'));
+    const purchase_date = formData.get('purchase_date') as string;
+    const notes = (formData.get('notes') as string)?.trim() || null;
+
+    if (!asset_id || !asset_name || purchase_price <= 0 || !purchase_date) {
+      return { error: 'Asset ID, name, valid purchase price, and date are required.' };
+    }
+
+    const { isAdmin } = await getCurrentUserRole();
+    if (!isAdmin) return { error: 'Unauthorized: Admins only.' };
+
+    const { editorName, editorDesignation, auditUser } = await getActiveEditorDetails();
+
+    const { data: oldAsset } = await supabaseAdmin.from('assets').select('*').eq('id', asset_id).single();
+    if (!oldAsset) return { error: 'Asset not found.' };
+
+    const { error } = await supabaseAdmin.from('assets').update({
+      asset_name, asset_type, purchase_price, purchase_date, notes, updated_at: new Date().toISOString()
+    }).eq('id', asset_id);
+
+    if (error) return { error: error.message };
+
+    await supabaseAdmin.from('audit_logs').insert([{
+      entity_type: 'ASSET',
+      entity_id: String(asset_id),
+      action: 'ASSET_EDITED',
+      old_value: { asset_name: oldAsset.asset_name, asset_type: oldAsset.asset_type, purchase_price: oldAsset.purchase_price, purchase_date: oldAsset.purchase_date, notes: oldAsset.notes },
+      new_value: { asset_name, asset_type, purchase_price, purchase_date, notes, last_changed_by: `${editorName} (${editorDesignation})` },
+      reason: `Asset details modified by ${editorName} (${editorDesignation})`,
+      changed_by_email: auditUser
+    }]);
+
+    revalidatePath('/treasury');
+    revalidatePath('/');
+    return { success: 'Asset details updated successfully!' };
+  } catch (err: any) {
+    return { error: err.message || 'Failed to update asset.' };
+  }
+}
+
+// 21a. Record Committee Expense
 export async function recordExpense(formData: FormData) {
   try {
     const title = (formData.get('title') as string)?.trim();
@@ -1726,22 +1934,10 @@ export async function recordExpense(formData: FormData) {
       return { error: 'Title, amount, and expense date are required.' };
     }
 
-    const { isAdmin, email: adminEmail } = await getCurrentUserRole();
-    if (!isAdmin) {
-      return { error: 'Unauthorized: Admins only.' };
-    }
+    const { isAdmin } = await getCurrentUserRole();
+    if (!isAdmin) return { error: 'Unauthorized: Admins only.' };
 
-    const supabaseServer = await getSupabaseServerClient();
-    const { data: { user } } = await supabaseServer.auth.getUser();
-
-    const { data: adminProfile } = await supabaseAdmin
-      .from('profiles')
-      .select('id, full_name, committee_position, role')
-      .eq('id', user?.id)
-      .single();
-
-    const adminName = adminProfile?.full_name?.replace(/\s*\((Admin|Superadmin)\)/gi, '').trim() || 'System Admin';
-    const adminDesignation = adminProfile?.committee_position || (adminProfile?.role === 'SUPER_ADMIN' ? 'Chairperson / President' : 'Committee Secretary');
+    const { editorId, editorName, editorDesignation, auditUser } = await getActiveEditorDetails();
 
     const expense_code = await generateExpenseCode();
 
@@ -1752,9 +1948,9 @@ export async function recordExpense(formData: FormData) {
       amount,
       expense_date,
       notes,
-      recorded_by_id: adminProfile?.id,
-      recorded_by_name: adminName,
-      recorded_by_designation: adminDesignation,
+      recorded_by_id: editorId,
+      recorded_by_name: editorName,
+      recorded_by_designation: editorDesignation,
     }]).select().single();
 
     if (error) return { error: error.message };
@@ -1769,10 +1965,10 @@ export async function recordExpense(formData: FormData) {
         amount, 
         category, 
         expense_date,
-        recorded_by: `${adminName} (${adminDesignation})`
+        recorded_by: `${editorName} (${editorDesignation})`
       },
       reason: notes || 'Official Committee Expense Logged',
-      changed_by_email: adminEmail || 'System Admin'
+      changed_by_email: auditUser
     }]);
 
     revalidatePath('/expenses');
@@ -1782,81 +1978,204 @@ export async function recordExpense(formData: FormData) {
     return { 
       success: `Expense recorded successfully! Voucher ID: ${expense_code}`,
       expense_code,
-      recorded_by_name: adminName,
-      recorded_by_designation: adminDesignation,
+      recorded_by_name: editorName,
+      recorded_by_designation: editorDesignation,
     };
   } catch (err: any) {
     return { error: err.message || 'Failed to record expense.' };
   }
 }
 
-// 22. Update Asset Valuation
-export async function updateAssetValuation(formData: FormData) {
-  const assetId = Number(formData.get('asset_id'));
-  const new_value = Number(formData.get('current_value'));
-  const reason = (formData.get('reason') as string)?.trim();
+// 21b. UPDATE EXPENSE (Preserves Original Creator + Logs Last Changed By Audit)
+export async function updateExpense(formData: FormData) {
+  try {
+    const expense_id = Number(formData.get('expense_id'));
+    const title = (formData.get('title') as string)?.trim();
+    const category = formData.get('category') as string;
+    const amount = Number(formData.get('amount'));
+    const expense_date = formData.get('expense_date') as string;
+    const notes = (formData.get('notes') as string)?.trim() || null;
 
-  if (!assetId || !new_value || !reason) {
-    return { error: 'Asset ID, new valuation, and audit reason are required.' };
+    if (!expense_id || !title || !amount || !expense_date) {
+      return { error: 'Expense ID, title, amount, and expense date are required.' };
+    }
+
+    const { isAdmin } = await getCurrentUserRole();
+    if (!isAdmin) return { error: 'Unauthorized: Admins only.' };
+
+    const { editorName, editorDesignation, auditUser } = await getActiveEditorDetails();
+
+    const { data: oldExpense } = await supabaseAdmin
+      .from('expenses')
+      .select('*')
+      .eq('id', expense_id)
+      .single();
+
+    if (!oldExpense) return { error: 'Expense record not found.' };
+
+    const { error } = await supabaseAdmin
+      .from('expenses')
+      .update({
+        title,
+        category,
+        amount,
+        expense_date,
+        notes,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', expense_id);
+
+    if (error) return { error: error.message };
+
+    await supabaseAdmin.from('audit_logs').insert([{
+      entity_type: 'EXPENSE',
+      entity_id: String(expense_id),
+      action: 'EXPENSE_EDITED',
+      old_value: {
+        expense_code: oldExpense.expense_code,
+        title: oldExpense.title,
+        amount: oldExpense.amount,
+        category: oldExpense.category,
+        expense_date: oldExpense.expense_date,
+        notes: oldExpense.notes,
+        original_recorded_by: `${oldExpense.recorded_by_name || 'Admin'} (${oldExpense.recorded_by_designation || 'Officer'})`,
+      },
+      new_value: { 
+        title, 
+        amount, 
+        category, 
+        expense_date, 
+        notes,
+        last_changed_by: `${editorName} (${editorDesignation})`,
+      },
+      reason: `Expense entry modified by ${editorName} (${editorDesignation})`,
+      changed_by_email: auditUser,
+    }]);
+
+    revalidatePath('/expenses');
+    revalidatePath('/treasury');
+    revalidatePath('/');
+
+    return { success: `Expense voucher (${oldExpense.expense_code || expense_id}) updated successfully!` };
+  } catch (err: any) {
+    return { error: err.message || 'Failed to update expense.' };
   }
-
-  const { email } = await getCurrentUserRole();
-
-  const { data: oldAsset } = await supabaseAdmin.from('assets').select('*').eq('id', assetId).single();
-
-  if (!oldAsset) return { error: 'Property asset record not found.' };
-
-  const { error } = await supabaseAdmin.from('assets').update({ current_value: new_value }).eq('id', assetId);
-
-  if (error) return { error: error.message };
-
-  await supabaseAdmin.from('audit_logs').insert([{
-    entity_type: 'ASSET',
-    entity_id: String(assetId),
-    action: 'VALUATION_UPDATE',
-    old_value: { asset_name: oldAsset.asset_name, valuation: oldAsset.current_value },
-    new_value: { asset_name: oldAsset.asset_name, valuation: new_value },
-    reason,
-    changed_by_email: email || 'System Admin'
-  }]);
-
-  revalidatePath('/treasury');
-  revalidatePath('/');
-  return { success: 'Valuation updated and logged in compliance audit trail!' };
 }
 
-// 23. Update Deposit Record (Admins Only)
+// 22. UPDATE ASSET VALUATION (With Confirmation & Audit Trail)
+export async function updateAssetValuation(formData: FormData) {
+  try {
+    const assetId = Number(formData.get('asset_id'));
+    const new_value = Number(formData.get('current_value'));
+    const reason = (formData.get('reason') as string)?.trim();
+
+    if (!assetId || !new_value || new_value < 0 || !reason) {
+      return { error: 'Asset ID, new valuation, and audit reason are required.' };
+    }
+
+    const { isAdmin } = await getCurrentUserRole();
+    if (!isAdmin) return { error: 'Unauthorized: Admins only.' };
+
+    const { editorName, editorDesignation, auditUser } = await getActiveEditorDetails();
+
+    const { data: oldAsset } = await supabaseAdmin.from('assets').select('*').eq('id', assetId).single();
+    if (!oldAsset) return { error: 'Property asset record not found.' };
+
+    const { error } = await supabaseAdmin.from('assets').update({
+      current_value: new_value,
+      updated_at: new Date().toISOString()
+    }).eq('id', assetId);
+
+    if (error) return { error: error.message };
+
+    await supabaseAdmin.from('audit_logs').insert([{
+      entity_type: 'ASSET',
+      entity_id: String(assetId),
+      action: 'VALUATION_UPDATE',
+      old_value: { asset_name: oldAsset.asset_name, valuation: oldAsset.current_value },
+      new_value: { 
+        asset_name: oldAsset.asset_name, 
+        valuation: new_value, 
+        last_changed_by: `${editorName} (${editorDesignation})` 
+      },
+      reason,
+      changed_by_email: auditUser
+    }]);
+
+    revalidatePath('/treasury');
+    revalidatePath('/');
+    return { success: `Valuation for "${oldAsset.asset_name}" updated to NPR ${new_value.toLocaleString('en-IN')}!` };
+  } catch (err: any) {
+    return { error: err.message || 'Failed to update asset valuation.' };
+  }
+}
+
+// 23. UPDATE DEPOSIT RECORD (Preserves Creator + Logs Last Changed By Audit)
 export async function updateDeposit(formData: FormData) {
-  const deposit_id = formData.get('deposit_id') as string;
-  const for_month = formData.get('for_month') as string;
-  const amount_paid = Number(formData.get('amount_paid'));
+  try {
+    const deposit_id = formData.get('deposit_id') as string;
+    const for_month = formData.get('for_month') as string;
+    const amount_paid = Number(formData.get('amount_paid'));
 
-  if (!deposit_id || !for_month || !amount_paid) {
-    return { error: 'Deposit ID, month, and amount are required.' };
+    if (!deposit_id || !for_month || !amount_paid) {
+      return { error: 'Deposit ID, month, and amount are required.' };
+    }
+
+    const { isAdmin } = await getCurrentUserRole();
+    if (!isAdmin) return { error: 'Unauthorized: Committee Admins only.' };
+
+    const { editorName, editorDesignation, auditUser } = await getActiveEditorDetails();
+
+    const formattedMonth = for_month.length === 7 ? `${for_month}-01` : for_month;
+
+    const { data: oldDeposit } = await supabaseAdmin
+      .from('deposits')
+      .select('*')
+      .eq('id', deposit_id)
+      .single();
+
+    if (!oldDeposit) return { error: 'Deposit record not found.' };
+
+    const { error } = await supabaseAdmin
+      .from('deposits')
+      .update({
+        for_month: formattedMonth,
+        amount_paid,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', deposit_id);
+
+    if (error) return { error: error.message };
+
+    await supabaseAdmin.from('audit_logs').insert([{
+      entity_type: 'SAVINGS_DEPOSIT',
+      entity_id: String(deposit_id),
+      action: 'DEPOSIT_RECORD_EDITED',
+      old_value: {
+        deposit_code: oldDeposit.deposit_code,
+        for_month: oldDeposit.for_month,
+        amount_paid: oldDeposit.amount_paid,
+        member_id: oldDeposit.member_id,
+        original_recorded_by: `${oldDeposit.recorded_by_name || 'Admin'} (${oldDeposit.recorded_by_designation || 'Officer'})`,
+      },
+      new_value: { 
+        for_month: formattedMonth, 
+        amount_paid,
+        last_changed_by: `${editorName} (${editorDesignation})`
+      },
+      reason: `Savings deposit ledger entry corrected by ${editorName} (${editorDesignation})`,
+      changed_by_email: auditUser,
+    }]);
+
+    revalidatePath('/deposits');
+    revalidatePath('/members');
+    revalidatePath('/admin/user-lookup');
+    revalidatePath('/');
+
+    return { success: `Deposit voucher (${oldDeposit.deposit_code || deposit_id}) updated successfully!` };
+  } catch (err: any) {
+    return { error: err.message || 'Failed to update deposit record.' };
   }
-
-  const { isAdmin } = await getCurrentUserRole();
-  if (!isAdmin) {
-    return { error: 'Unauthorized: Only Committee Admins can modify deposit records.' };
-  }
-
-  const formattedMonth = for_month.length === 7 ? `${for_month}-01` : for_month;
-
-  const { error } = await supabaseAdmin
-    .from('deposits')
-    .update({
-      for_month: formattedMonth,
-      amount_paid,
-    })
-    .eq('id', deposit_id);
-
-  if (error) return { error: error.message };
-
-  revalidatePath('/deposits');
-  revalidatePath('/members');
-  revalidatePath('/admin/user-lookup');
-  revalidatePath('/');
-  return { success: 'Deposit record updated successfully!' };
 }
 
 // 24. Distribute Dividends
@@ -1937,90 +2256,157 @@ export async function distributeDividends(formData: FormData) {
   return { success: `Dividend "${title}" of NPR ${total_profit_pool.toLocaleString('en-IN')} distributed across ${members.length} members!` };
 }
 
-// 25. Update Disbursed Loan Info
+// 25. UPDATE LOAN (With Last Changed By Audit Tracking)
 export async function updateLoan(formData: FormData) {
-  const loan_id = Number(formData.get('loan_id'));
-  const principal_amount = Number(formData.get('principal_amount'));
-  const current_rate = Number(formData.get('current_rate'));
-  const tenure_months = Number(formData.get('tenure_months'));
-  const issue_date = formData.get('issue_date') as string;
-  const status = formData.get('status') as string;
+  try {
+    const loan_id = Number(formData.get('loan_id'));
+    const principal_amount = Number(formData.get('principal_amount'));
+    const current_rate = Number(formData.get('current_rate'));
+    const tenure_months = Number(formData.get('tenure_months'));
+    const issue_date = formData.get('issue_date') as string;
+    const status = formData.get('status') as string;
 
-  if (!loan_id || !principal_amount || !issue_date) {
-    return { error: 'Loan ID, principal amount, and issue date are required.' };
+    if (!loan_id || !principal_amount || !issue_date) {
+      return { error: 'Loan ID, principal amount, and issue date are required.' };
+    }
+
+    const { isSuperAdmin } = await getCurrentUserRole();
+    if (!isSuperAdmin) return { error: 'Unauthorized: Only Superadmins can modify loan details.' };
+
+    const { editorName, editorDesignation, auditUser } = await getActiveEditorDetails();
+
+    const { data: oldLoan } = await supabaseAdmin
+      .from('loans')
+      .select('*')
+      .eq('id', loan_id)
+      .single();
+
+    if (!oldLoan) return { error: 'Loan record not found.' };
+
+    const monthlyRate = (current_rate || 12.0) / 12 / 100;
+    let monthly_emi = 0;
+    if (monthlyRate > 0) {
+      monthly_emi = (principal_amount * monthlyRate * Math.pow(1 + monthlyRate, tenure_months)) /
+                    (Math.pow(1 + monthlyRate, tenure_months) - 1);
+    } else {
+      monthly_emi = principal_amount / tenure_months;
+    }
+
+    const { error } = await supabaseAdmin
+      .from('loans')
+      .update({
+        principal_amount,
+        current_rate,
+        tenure_months,
+        monthly_emi: Math.round(monthly_emi),
+        issue_date,
+        status: status || 'ACTIVE',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', loan_id);
+
+    if (error) return { error: error.message };
+
+    await supabaseAdmin.from('audit_logs').insert([{
+      entity_type: 'LOAN_RECORD',
+      entity_id: String(loan_id),
+      action: 'LOAN_RECORD_EDITED',
+      old_value: {
+        loan_code: oldLoan.loan_code,
+        principal_amount: oldLoan.principal_amount,
+        current_rate: oldLoan.current_rate,
+        tenure_months: oldLoan.tenure_months,
+        status: oldLoan.status,
+      },
+      new_value: { 
+        principal_amount, 
+        current_rate, 
+        tenure_months, 
+        status,
+        last_changed_by: `${editorName} (${editorDesignation})`
+      },
+      reason: `Disbursed loan record modified by ${editorName} (${editorDesignation})`,
+      changed_by_email: auditUser,
+    }]);
+
+    revalidatePath('/loans');
+    revalidatePath('/members');
+    revalidatePath('/admin/user-lookup');
+    revalidatePath('/');
+
+    return { success: `Loan record (${oldLoan.loan_code || loan_id}) updated successfully!` };
+  } catch (err: any) {
+    return { error: err.message || 'Failed to update loan record.' };
   }
-
-  const { isSuperAdmin } = await getCurrentUserRole();
-  if (!isSuperAdmin) {
-    return { error: 'Unauthorized: Only Superadmins can modify loan details.' };
-  }
-
-  const monthlyRate = (current_rate || 12.0) / 12 / 100;
-  let monthly_emi = 0;
-  if (monthlyRate > 0) {
-    monthly_emi = (principal_amount * monthlyRate * Math.pow(1 + monthlyRate, tenure_months)) /
-                  (Math.pow(1 + monthlyRate, tenure_months) - 1);
-  } else {
-    monthly_emi = principal_amount / tenure_months;
-  }
-
-  const { error } = await supabaseAdmin
-    .from('loans')
-    .update({
-      principal_amount,
-      current_rate,
-      tenure_months,
-      monthly_emi: Math.round(monthly_emi),
-      issue_date,
-      status: status || 'ACTIVE',
-    })
-    .eq('id', loan_id);
-
-  if (error) return { error: error.message };
-
-  revalidatePath('/loans');
-  revalidatePath('/members');
-  revalidatePath('/admin/user-lookup');
-  revalidatePath('/');
-  return { success: 'Disbursed loan record updated successfully!' };
 }
 
-// 26. Update Recorded Loan Repayment
+// 26. UPDATE LOAN REPAYMENT (Preserves Creator + Logs Last Changed By Audit)
 export async function updateLoanPayment(formData: FormData) {
-  const payment_id = Number(formData.get('payment_id'));
-  const principal_paid = Number(formData.get('principal_paid')) || 0;
-  const interest_paid = Number(formData.get('interest_paid')) || 0;
-  const payment_date = formData.get('payment_date') as string;
+  try {
+    const payment_id = Number(formData.get('payment_id'));
+    const principal_paid = Number(formData.get('principal_paid')) || 0;
+    const interest_paid = Number(formData.get('interest_paid')) || 0;
+    const payment_date = formData.get('payment_date') as string;
 
-  if (!payment_id || !payment_date) {
-    return { error: 'Payment ID and payment date are required.' };
+    if (!payment_id || !payment_date) return { error: 'Payment ID and date are required.' };
+    if (principal_paid <= 0 && interest_paid <= 0) return { error: 'Please enter valid repayment amounts.' };
+
+    const { isSuperAdmin } = await getCurrentUserRole();
+    if (!isSuperAdmin) return { error: 'Unauthorized: Superadmins only.' };
+
+    const { editorName, editorDesignation, auditUser } = await getActiveEditorDetails();
+
+    const { data: oldPayment } = await supabaseAdmin
+      .from('loan_payments')
+      .select('*')
+      .eq('id', payment_id)
+      .single();
+
+    if (!oldPayment) return { error: 'Repayment record not found.' };
+
+    const { error } = await supabaseAdmin
+      .from('loan_payments')
+      .update({
+        principal_paid,
+        interest_paid,
+        payment_date,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', payment_id);
+
+    if (error) return { error: error.message };
+
+    await supabaseAdmin.from('audit_logs').insert([{
+      entity_type: 'LOAN_REPAYMENT',
+      entity_id: String(payment_id),
+      action: 'REPAYMENT_LOG_EDITED',
+      old_value: {
+        payment_code: oldPayment.payment_code,
+        loan_id: oldPayment.loan_id,
+        principal_paid: oldPayment.principal_paid,
+        interest_paid: oldPayment.interest_paid,
+        payment_date: oldPayment.payment_date,
+        original_recorded_by: `${oldPayment.recorded_by_name || 'Admin'} (${oldPayment.recorded_by_designation || 'Officer'})`,
+      },
+      new_value: { 
+        principal_paid, 
+        interest_paid, 
+        payment_date,
+        last_changed_by: `${editorName} (${editorDesignation})`
+      },
+      reason: `Repayment ledger entry modified by ${editorName} (${editorDesignation})`,
+      changed_by_email: auditUser,
+    }]);
+
+    revalidatePath('/loans');
+    revalidatePath('/members');
+    revalidatePath('/admin/user-lookup');
+    revalidatePath('/');
+
+    return { success: `Repayment entry (${oldPayment.payment_code || payment_id}) corrected successfully!` };
+  } catch (err: any) {
+    return { error: err.message || 'Failed to update repayment record.' };
   }
-
-  if (principal_paid <= 0 && interest_paid <= 0) {
-    return { error: 'Please enter a valid principal or interest repayment amount.' };
-  }
-
-  const { isSuperAdmin } = await getCurrentUserRole();
-  if (!isSuperAdmin) {
-    return { error: 'Unauthorized: Only Superadmins can modify repayment logs.' };
-  }
-
-  const { error } = await supabaseAdmin
-    .from('loan_payments')
-    .update({
-      principal_paid,
-      interest_paid,
-      payment_date,
-    })
-    .eq('id', payment_id);
-
-  if (error) return { error: error.message };
-
-  revalidatePath('/loans');
-  revalidatePath('/members');
-  revalidatePath('/admin/user-lookup');
-  revalidatePath('/');
-  return { success: 'Repayment record corrected successfully!' };
 }
 
 // 27. Fetch Organogram Structure
