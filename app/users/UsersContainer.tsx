@@ -16,6 +16,7 @@ import {
 import RegisterAdminForm from './RegisterAdminForm';
 import RegisterSuperAdminForm from './RegisterSuperAdminForm';
 import AdminDetailsModal from './AdminDetailsModal';
+import ResetUserPasswordModal from './ResetUserPasswordModal';
 
 interface UsersContainerProps {
   isSuperAdmin: boolean;
@@ -34,10 +35,11 @@ export default function UsersContainer({
 }: UsersContainerProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [roleFilter, setRoleFilter] = useState<'ALL' | 'ADMIN' | 'SUPER_ADMIN'>('ALL');
+  const [memberSearchQuery, setMemberSearchQuery] = useState('');
 
   const safeProfiles = useMemo(() => (Array.isArray(profiles) ? profiles : []), [profiles]);
 
-  // STRICT FILTER: Keep ONLY Admin & Superadmin profiles
+  // Keep ONLY Admin & Superadmin profiles
   const administrativeStaff = useMemo(() => {
     return safeProfiles.filter(
       (p) =>
@@ -45,6 +47,13 @@ export default function UsersContainer({
         p.role === 'SUPER_ADMIN' ||
         p.account_id?.startsWith('ADMIN-') ||
         p.account_id?.startsWith('SA-')
+    );
+  }, [safeProfiles]);
+
+  // Keep General Members (excluding Admins, Superadmins, and External Borrowers)
+  const generalMembers = useMemo(() => {
+    return safeProfiles.filter(
+      (p) => p.user_type === 'MEMBER' && p.role !== 'ADMIN' && p.role !== 'SUPER_ADMIN'
     );
   }, [safeProfiles]);
 
@@ -56,15 +65,13 @@ export default function UsersContainer({
     return administrativeStaff.filter((p) => p.role === 'ADMIN' || p.account_id?.startsWith('ADMIN-'));
   }, [administrativeStaff]);
 
-  const generalMembersCount = useMemo(() => {
-    return safeProfiles.filter((p) => p.user_type === 'MEMBER' && p.role !== 'ADMIN' && p.role !== 'SUPER_ADMIN').length;
-  }, [safeProfiles]);
+  const generalMembersCount = generalMembers.length;
 
   const externalBorrowersCount = useMemo(() => {
     return safeProfiles.filter((p) => p.user_type === 'NON_MEMBER').length;
   }, [safeProfiles]);
 
-  // Filter Administrative Staff table by search and role filter
+  // Filter Administrative Staff table
   const filteredAdminStaff = useMemo(() => {
     return administrativeStaff.filter((p) => {
       const isSA = p.role === 'SUPER_ADMIN' || p.account_id?.startsWith('SA-');
@@ -84,6 +91,20 @@ export default function UsersContainer({
       );
     });
   }, [administrativeStaff, roleFilter, searchQuery]);
+
+  // Filter General Members table
+  const filteredGeneralMembers = useMemo(() => {
+    const q = memberSearchQuery.toLowerCase().trim();
+    if (!q) return generalMembers;
+
+    return generalMembers.filter(
+      (m) =>
+        (m.full_name && m.full_name.toLowerCase().includes(q)) ||
+        (m.account_id && m.account_id.toLowerCase().includes(q)) ||
+        (m.email && m.email.toLowerCase().includes(q)) ||
+        (m.phone && m.phone.includes(q))
+    );
+  }, [generalMembers, memberSearchQuery]);
 
   return (
     <div className="space-y-6 text-left">
@@ -114,7 +135,7 @@ export default function UsersContainer({
             <Users size={16} />
           </div>
           <div className="text-2xl font-black text-emerald-950 font-mono">{generalMembersCount}</div>
-          <p className="text-[10px] text-emerald-700 font-semibold">Managed in Members Ledger</p>
+          <p className="text-[10px] text-emerald-700 font-semibold">Registered Cooperative Members</p>
         </div>
 
         <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl space-y-1">
@@ -164,7 +185,7 @@ export default function UsersContainer({
                 <td className="p-3 text-center text-emerald-600"><Check size={16} className="mx-auto" /></td>
               </tr>
               <tr>
-                <td className="p-3 text-slate-900 font-bold">Reassign Executive Positions, Edit Info & Offboard Admins</td>
+                <td className="p-3 text-slate-900 font-bold">Reassign Executive Positions, Edit Info & Reset Passwords</td>
                 <td className="p-3 text-center text-red-500"><X size={16} className="mx-auto" /></td>
                 <td className="p-3 text-center text-emerald-600"><Check size={16} className="mx-auto" /></td>
               </tr>
@@ -182,11 +203,11 @@ export default function UsersContainer({
       ) : (
         <div className="p-4 bg-amber-50 border border-amber-200 text-amber-900 rounded-xl text-xs flex items-center gap-2">
           <Lock size={16} />
-          <span>Viewing in <strong>Committee Admin Mode</strong>. Registering new Admins or reassigning positions is restricted to Superadmins.</span>
+          <span>Viewing in <strong>Committee Admin Mode</strong>. Registering new Admins, reassigning positions, or overriding passwords is restricted to Superadmins.</span>
         </div>
       )}
 
-      {/* ADMIN-ONLY DIRECTORY TABLE */}
+      {/* SECTION 1: ADMIN-ONLY DIRECTORY TABLE */}
       <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden space-y-0">
         <div className="p-4 border-b border-slate-200 flex flex-col xl:flex-row xl:items-center justify-between gap-3">
           <span className="font-semibold text-slate-800 text-sm">
@@ -246,7 +267,7 @@ export default function UsersContainer({
         </div>
 
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
+          <table className="w-full text-left text-sm align-middle">
             <thead className="bg-slate-50 text-slate-500 text-xs uppercase font-semibold border-b border-slate-200">
               <tr>
                 <th className="p-3 font-mono">Account ID & Name</th>
@@ -263,39 +284,51 @@ export default function UsersContainer({
 
                 return (
                   <tr key={p.id} className="hover:bg-slate-50 transition-colors">
-                    <td className="p-3 font-medium text-slate-900">
+                    <td className="p-3 font-medium text-slate-900 align-middle">
                       <div className="font-bold text-slate-900">{p.full_name}</div>
                       <div className="text-xs font-mono text-purple-900 font-extrabold">{p.account_id || 'N/A'}</div>
                     </td>
 
-                    <td className="p-3 text-xs font-mono">
-                      <span className={`px-2.5 py-0.5 rounded font-extrabold text-[10px] ${
+                    <td className="p-3 text-xs font-mono align-middle">
+                      <span className={`px-2.5 py-0.5 rounded font-extrabold text-[10px] inline-block ${
                         isSA ? 'bg-purple-100 text-purple-950 border border-purple-300' : 'bg-blue-100 text-blue-950 border border-blue-300'
                       }`}>
                         {isSA ? 'SUPER_ADMIN' : 'ADMIN'}
                       </span>
                     </td>
 
-                    <td className="p-3 text-xs">
+                    <td className="p-3 text-xs align-middle">
                       <div className="font-bold text-slate-800">{p.committee_position || 'Executive Board'}</div>
                     </td>
 
-                    <td className="p-3 text-xs font-mono text-slate-700">{p.phone || 'N/A'}</td>
+                    <td className="p-3 text-xs font-mono text-slate-700 align-middle">{p.phone || 'N/A'}</td>
 
-                    <td className="p-3 text-xs">
-                      <span className={`px-2 py-0.5 text-[10px] font-extrabold rounded ${
+                    <td className="p-3 text-xs align-middle">
+                      <span className={`px-2 py-0.5 text-[10px] font-extrabold rounded inline-block ${
                         p.status === 'INACTIVE' ? 'bg-red-100 text-red-800' : 'bg-emerald-100 text-emerald-800'
                       }`}>
                         {p.status || 'ACTIVE'}
                       </span>
                     </td>
 
-                    <td className="p-3 text-right">
-                      <AdminDetailsModal
-                        admin={p}
-                        auditLogs={auditLogs}
-                        isSuperAdmin={isSuperAdmin}
-                      />
+                    <td className="p-3 text-right align-middle">
+                      <div className="inline-flex items-center justify-end gap-2">
+                        {isSuperAdmin && (
+                          <ResetUserPasswordModal
+                            user={{
+                              id: p.id,
+                              full_name: p.full_name,
+                              account_id: p.account_id || 'N/A',
+                              role: p.role,
+                            }}
+                          />
+                        )}
+                        <AdminDetailsModal
+                          admin={p}
+                          auditLogs={auditLogs}
+                          isSuperAdmin={isSuperAdmin}
+                        />
+                      </div>
                     </td>
                   </tr>
                 );
@@ -305,6 +338,97 @@ export default function UsersContainer({
                 <tr>
                   <td colSpan={6} className="p-6 text-center text-slate-400 text-xs font-medium">
                     No administrative credentials found matching the applied filters.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* SECTION 2: GENERAL MEMBERS PASSWORD MANAGEMENT DIRECTORY */}
+      <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden space-y-0">
+        <div className="p-4 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <h3 className="font-bold text-slate-900 text-sm flex items-center gap-2">
+              <Users size={18} className="text-emerald-700" />
+              General Members Credentials Directory ({filteredGeneralMembers.length} of {generalMembers.length})
+            </h3>
+            <p className="text-xs text-slate-500">
+              Manage member account login credentials and perform manual password resets
+            </p>
+          </div>
+
+          <div className="relative sm:w-72">
+            <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              type="text"
+              placeholder="Search Member Name, Account ID, Email..."
+              value={memberSearchQuery}
+              onChange={(e) => setMemberSearchQuery(e.target.value)}
+              className="w-full pl-9 pr-3 py-1.5 text-xs border border-slate-300 rounded-lg bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-700"
+            />
+          </div>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm align-middle">
+            <thead className="bg-slate-50 text-slate-500 text-xs uppercase font-semibold border-b border-slate-200">
+              <tr>
+                <th className="p-3 font-mono">Account ID & Name</th>
+                <th className="p-3">Email Address</th>
+                <th className="p-3">Phone</th>
+                <th className="p-3">Status</th>
+                <th className="p-3 text-right">Password Override</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {filteredGeneralMembers.map((m) => (
+                <tr key={m.id} className="hover:bg-slate-50 transition-colors">
+                  <td className="p-3 font-medium text-slate-900 align-middle">
+                    <div className="font-bold text-slate-900">{m.full_name}</div>
+                    <div className="text-xs font-mono text-emerald-900 font-extrabold">{m.account_id || 'N/A'}</div>
+                  </td>
+
+                  <td className="p-3 text-xs font-mono text-slate-700 align-middle">
+                    {m.email || <span className="text-slate-400 font-sans italic">No email linked</span>}
+                  </td>
+
+                  <td className="p-3 text-xs font-mono text-slate-700 align-middle">{m.phone || 'N/A'}</td>
+
+                  <td className="p-3 text-xs align-middle">
+                    <span className={`px-2 py-0.5 text-[10px] font-extrabold rounded inline-block ${
+                      m.status === 'INACTIVE' || m.status === 'SETTLED' ? 'bg-red-100 text-red-800' : 'bg-emerald-100 text-emerald-800'
+                    }`}>
+                      {m.status || 'ACTIVE'}
+                    </span>
+                  </td>
+
+                  <td className="p-3 text-right align-middle">
+                    <div className="inline-flex items-center justify-end">
+                      {isSuperAdmin ? (
+                        <ResetUserPasswordModal
+                          user={{
+                            id: m.id,
+                            full_name: m.full_name,
+                            account_id: m.account_id || 'N/A',
+                            role: m.role || 'MEMBER',
+                          }}
+                        />
+                      ) : (
+                        <span className="text-[11px] text-slate-400 font-semibold px-2.5 py-1 bg-slate-100 rounded border border-slate-200 inline-flex items-center gap-1 cursor-not-allowed">
+                          <Lock size={12} /> Restricted
+                        </span>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+
+              {filteredGeneralMembers.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="p-6 text-center text-slate-400 text-xs font-medium">
+                    No general member profiles found matching your search query.
                   </td>
                 </tr>
               )}

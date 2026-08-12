@@ -3,6 +3,7 @@
 import { useState, useRef } from 'react';
 import { loginUser } from '@/app/actions';
 import { Lock, User, KeyRound } from 'lucide-react';
+import ForgotPasswordModal from './ForgotPasswordModal';
 
 export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
@@ -58,9 +59,11 @@ export default function LoginPage() {
           </div>
 
           <div>
-            <label className="block text-xs font-bold text-slate-700 mb-1">
-              Password
-            </label>
+            <div className="flex justify-between items-center mb-1">
+              <label className="block text-xs font-bold text-slate-700">
+                Password
+              </label>
+            </div>
             <div className="relative">
               <Lock size={16} className="absolute left-3 top-3 text-slate-400" />
               <input
@@ -81,6 +84,12 @@ export default function LoginPage() {
             {loading ? 'Authenticating...' : 'Sign In'}
           </button>
         </form>
+
+        {/* FORGOT PASSWORD MODAL PLACED OUTSIDE THE LOGIN FORM */}
+        <div className="text-right pt-1">
+          <ForgotPasswordModal />
+        </div>
+
       </div>
     </div>
   );

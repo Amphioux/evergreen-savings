@@ -15,6 +15,27 @@ interface IssueLoanFormProps {
   };
 }
 
+// Dynamically extracts the executive designation title directly from committee position
+function formatApproverDesignation(admin?: { committee_position?: string; role?: string }): string {
+  if (!admin) return 'Committee Officer';
+
+  if (admin.committee_position && admin.committee_position.trim()) {
+    // Strips out any appended "(Admin)" or "(Superadmin)" tags
+    const position = admin.committee_position.replace(/\s*\((Admin|Superadmin)\)/gi, '').trim();
+    if (position && position.toLowerCase() !== 'admin' && position.toLowerCase() !== 'superadmin') {
+      return position;
+    }
+  }
+
+  // Role fallback if position field was left blank
+  return admin.role === 'SUPER_ADMIN' ? 'Chairperson / President' : 'Committee Secretary';
+}
+
+function cleanAdminName(name?: string): string {
+  if (!name) return 'Logged Admin';
+  return name.replace(/\s*\((Admin|Superadmin)\)/gi, '').trim();
+}
+
 export default function IssueLoanForm({
   profiles,
   activeLoans = [],
@@ -39,6 +60,10 @@ export default function IssueLoanForm({
   const formRef = useRef<HTMLFormElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Approver Executive Details
+  const adminName = cleanAdminName(currentAdmin?.full_name);
+  const adminDesignation = formatApproverDesignation(currentAdmin);
+
   // Filter eligible borrowers and guarantors
   const eligibleBorrowers = profiles.filter(
     (p) =>
@@ -58,11 +83,6 @@ export default function IssueLoanForm({
   const selectedBorrower = eligibleBorrowers.find((p) => p.id === selectedBorrowerId);
   const selectedGuarantor = eligibleGuarantors.find((p) => p.id === selectedGuarantorId);
   const isExternalBorrower = selectedBorrower?.user_type === 'NON_MEMBER';
-
-  // Approver display label
-  const adminName = currentAdmin?.full_name || 'Logged Admin';
-  const adminDesignation =
-    currentAdmin?.committee_position || (currentAdmin?.role === 'SUPER_ADMIN' ? 'Superadmin' : 'Committee Admin');
 
   // Check active loan backlog
   const selectedBorrowerActiveLoan = useMemo(() => {
@@ -111,7 +131,6 @@ export default function IssueLoanForm({
       return;
     }
 
-    // 1. Validate File Format
     if (file.type !== 'application/pdf') {
       setFileError('Invalid file type! Scanned loan application must be a PDF document.');
       setPdfFile(null);
@@ -119,7 +138,6 @@ export default function IssueLoanForm({
       return;
     }
 
-    // 2. Validate File Size (< 500 KB)
     const maxSizeBytes = 500 * 1024;
     if (file.size > maxSizeBytes) {
       const fileSizeKb = (file.size / 1024).toFixed(1);
@@ -178,14 +196,14 @@ export default function IssueLoanForm({
   }
 
   return (
-    <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm space-y-4 text-left">
+    <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-xs space-y-4 text-left font-sans">
       <div className="flex items-center justify-between border-b pb-2">
         <div className="flex items-center gap-2 font-bold text-slate-900 text-sm">
           <Banknote size={18} className="text-amber-700" />
           <h3>Disburse New Loan</h3>
         </div>
 
-        {/* Auto-populated Approver Badge */}
+        {/* Executive Position Designation Badge */}
         <div className="flex items-center gap-1.5 px-2.5 py-1 bg-amber-50 border border-amber-200 rounded-lg text-xs font-semibold text-amber-900">
           <UserCheck size={13} className="text-amber-700" />
           <span>Approver: <strong>{adminName}</strong> ({adminDesignation})</span>
@@ -242,7 +260,7 @@ export default function IssueLoanForm({
 
         {isSelectedBorrowerIneligible && (
           <div className="p-3 bg-red-50 border border-red-200 text-red-800 rounded-lg text-xs font-semibold flex items-center gap-2">
-            <AlertTriangle size={16} className="text-red-600 flex-shrink-0" />
+            <AlertTriangle size={16} className="text-red-600 shrink-0" />
             <span>
               <strong>Loan Issuance Blocked:</strong> {selectedBorrower?.full_name} has an active loan (
               <strong>{selectedBorrowerActiveLoan.loan_code}</strong>) with an outstanding backlog of{' '}
@@ -279,7 +297,7 @@ export default function IssueLoanForm({
             </div>
           ) : (
             <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg flex items-center gap-2 text-slate-500 opacity-75">
-              <ShieldCheck size={16} className="text-slate-400 flex-shrink-0" />
+              <ShieldCheck size={16} className="text-slate-400 shrink-0" />
               <div>
                 <div className="font-bold text-slate-700 text-xs">Guarantor Not Required</div>
                 <div className="text-[10px] text-slate-500">
@@ -307,7 +325,7 @@ export default function IssueLoanForm({
 
           {fileError && (
             <div className="text-xs font-bold text-red-700 bg-red-50 p-2 border border-red-200 rounded-md flex items-center gap-1.5">
-              <AlertTriangle size={14} className="flex-shrink-0" />
+              <AlertTriangle size={14} className="shrink-0" />
               <span>{fileError}</span>
             </div>
           )}
@@ -318,7 +336,7 @@ export default function IssueLoanForm({
                 <FileText size={14} className="text-emerald-700" />
                 <span className="truncate">{pdfFile.name}</span>
               </span>
-              <span className="font-mono text-[11px] font-bold text-emerald-900 flex-shrink-0 ml-2">
+              <span className="font-mono text-[11px] font-bold text-emerald-900 shrink-0 ml-2">
                 {(pdfFile.size / 1024).toFixed(1)} KB (Valid)
               </span>
             </div>

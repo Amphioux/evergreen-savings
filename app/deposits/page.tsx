@@ -2,7 +2,6 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { getCurrentUserRole } from '@/lib/getUserRole';
 import GroupSavingsDirectoryContainer from './GroupSavingsDirectoryContainer';
 import DepositsClientContainer from './DepositsClientContainer';
-import MyDepositsLedger from './MyDepositsLedger';
 import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
@@ -84,10 +83,7 @@ export default async function DepositsPage() {
       {/* Admin Action Bar (Only visible to Admins) */}
       {isAdmin && <DepositsClientContainer activeMembers={activeMembers} deposits={depositList} allProfiles={allProfiles} />}
 
-      {/* SECTION 1: MY PERSONAL SAVINGS LEDGER (Non-Admins Only) */}
-      {!isAdmin && <MyDepositsLedger myDeposits={myDeposits} isAdmin={isAdmin} />}
-
-      {/* SECTION 2: GROUP SAVINGS DIRECTORY (Search, Filters, Live Totals & Print Ledger) */}
+      {/* GROUP SAVINGS DIRECTORY (Renders MyDepositsLedger internally for non-admins) */}
       <GroupSavingsDirectoryContainer
         depositList={depositList}
         myDeposits={myDeposits}

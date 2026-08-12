@@ -8,6 +8,23 @@ import { cookies } from 'next/headers';
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 
+// Password Complexity Validator
+function checkPasswordStrength(password: string): string | null {
+  if (password.length < 8) {
+    return 'Password must be at least 8 characters long.';
+  }
+  if (!/[A-Z]/.test(password)) {
+    return 'Password must contain at least one uppercase letter (A-Z).';
+  }
+  if (!/[0-9]/.test(password)) {
+    return 'Password must contain at least one numeric digit (0-9).';
+  }
+  if (!/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?~`]/.test(password)) {
+    return 'Password must contain at least one special character (!@#$%...).';
+  }
+  return null;
+}
+
 // Helper: Server-side Supabase client for Session & Auth management
 async function getSupabaseServerClient() {
   const cookieStore = await cookies();
@@ -33,7 +50,7 @@ async function getSupabaseServerClient() {
   );
 }
 
-// Helper: Auto-generate sequential Deposit ID (Format: DPYYMM-XXX) with optional offset for bulk loops
+// Helper: Auto-generate sequential Deposit ID (Format: DPYYMM-XXX)
 async function generateDepositCode(offset: number = 0): Promise<string> {
   const now = new Date();
   const yy = now.getFullYear().toString().slice(-2);
@@ -61,6 +78,37 @@ async function generateDepositCode(offset: number = 0): Promise<string> {
   }
 
   const nextSeq = (maxSeq + 1 + offset).toString().padStart(3, '0');
+  return `${prefix}-${nextSeq}`;
+}
+
+// Helper: Auto-generate sequential Expense ID (Format: EXPYYMM-XXX)
+async function generateExpenseCode(): Promise<string> {
+  const now = new Date();
+  const yy = now.getFullYear().toString().slice(-2);
+  const mm = (now.getMonth() + 1).toString().padStart(2, '0');
+  const prefix = `EXP${yy}${mm}`;
+
+  const { data: matches } = await supabaseAdmin
+    .from('expenses')
+    .select('expense_code')
+    .like('expense_code', `${prefix}-%`);
+
+  let maxSeq = 0;
+  if (matches) {
+    for (const e of matches) {
+      if (e.expense_code) {
+        const parts = e.expense_code.split('-');
+        if (parts.length === 2) {
+          const seqNum = parseInt(parts[1], 10);
+          if (!isNaN(seqNum) && seqNum > maxSeq) {
+            maxSeq = seqNum;
+          }
+        }
+      }
+    }
+  }
+
+  const nextSeq = (maxSeq + 1).toString().padStart(3, '0');
   return `${prefix}-${nextSeq}`;
 }
 
@@ -318,14 +366,61 @@ export async function logoutUser() {
 
 // 3. PASSWORD MANAGEMENT ACTIONS
 
-// 3a. Self-Service: Change Own Password from "My Profile" Tab
+// 3a. Self-Service: Change Own Password with Current Password Verification
+export async function changeOwnPasswordWithOld(formData: FormData) {
+  try {
+    const currentPassword = (formData.get('current_password') as string)?.trim();
+    const newPassword = (formData.get('new_password') as string)?.trim();
+    const confirmPassword = (formData.get('confirm_password') as string)?.trim();
+
+    if (!currentPassword) {
+      return { error: 'Please enter your current password.' };
+    }
+
+    const passwordError = checkPasswordStrength(newPassword);
+    if (passwordError) {
+      return { error: passwordError };
+    }
+
+    if (newPassword !== confirmPassword) {
+      return { error: 'New passwords do not match. Please try again.' };
+    }
+
+    const supabaseServer = await getSupabaseServerClient();
+    const { data: { user }, error: authError } = await supabaseServer.auth.getUser();
+
+    if (authError || !user || !user.email) {
+      return { error: 'Unauthorized session. Please log in again.' };
+    }
+
+    const { error: signInErr } = await supabaseServer.auth.signInWithPassword({
+      email: user.email,
+      password: currentPassword,
+    });
+
+    if (signInErr) {
+      return { error: 'Incorrect current password. Please verify and try again.' };
+    }
+
+    const { error: updateErr } = await supabaseServer.auth.updateUser({ password: newPassword });
+
+    if (updateErr) return { error: updateErr.message };
+
+    return { success: 'Your password has been changed successfully!' };
+  } catch (err: any) {
+    return { error: err.message || 'Failed to change password.' };
+  }
+}
+
+// 3b. Self-Service: Change Own Password (Legacy/Direct)
 export async function changeOwnPassword(formData: FormData) {
   try {
     const newPassword = (formData.get('new_password') as string)?.trim();
     const confirmPassword = (formData.get('confirm_password') as string)?.trim();
 
-    if (!newPassword || newPassword.length < 6) {
-      return { error: 'New password must be at least 6 characters long.' };
+    const passwordError = checkPasswordStrength(newPassword);
+    if (passwordError) {
+      return { error: passwordError };
     }
 
     if (newPassword !== confirmPassword) {
@@ -349,7 +444,7 @@ export async function changeOwnPassword(formData: FormData) {
   }
 }
 
-// 3b. Self-Service: Request Reset Link via Email from Login Page
+// 3c. Self-Service: Request Reset Link via Email from Login Page
 export async function requestPasswordReset(formData: FormData) {
   const email = (formData.get('email') as string)?.trim().toLowerCase();
   if (!email) return { error: 'Please enter a valid email address.' };
@@ -358,7 +453,7 @@ export async function requestPasswordReset(formData: FormData) {
   const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000';
 
   const { error } = await supabaseServer.auth.resetPasswordForEmail(email, {
-    redirectTo: `${siteUrl}/reset-password`,
+    redirectTo: `${siteUrl}/auth/callback?next=/reset-password`,
   });
 
   if (error) return { error: error.message };
@@ -366,11 +461,13 @@ export async function requestPasswordReset(formData: FormData) {
   return { success: 'Password reset link sent! Check your email inbox.' };
 }
 
-// 3c. Self-Service: Update Password with Reset Token
+// 3d. Self-Service: Update Password with Reset Token
 export async function updatePasswordWithToken(formData: FormData) {
   const password = (formData.get('password') as string)?.trim();
-  if (!password || password.length < 6) {
-    return { error: 'Password must be at least 6 characters long.' };
+  
+  const passwordError = checkPasswordStrength(password);
+  if (passwordError) {
+    return { error: passwordError };
   }
 
   const supabaseServer = await getSupabaseServerClient();
@@ -381,7 +478,7 @@ export async function updatePasswordWithToken(formData: FormData) {
   redirect('/login?reset=success');
 }
 
-// 3d. Superadmin Direct Password Override
+// 3e. Superadmin Direct Password Override
 export async function resetUserPasswordBySuperAdmin(formData: FormData) {
   try {
     const { isSuperAdmin, email: adminEmail } = await getCurrentUserRole();
@@ -391,7 +488,11 @@ export async function resetUserPasswordBySuperAdmin(formData: FormData) {
     const newPassword = (formData.get('new_password') as string)?.trim();
 
     if (!userId || !newPassword) return { error: 'User ID and new password are required.' };
-    if (newPassword.length < 6) return { error: 'Password must be at least 6 characters long.' };
+
+    const passwordError = checkPasswordStrength(newPassword);
+    if (passwordError) {
+      return { error: passwordError };
+    }
 
     const { data: profile } = await supabaseAdmin
       .from('profiles')
@@ -550,7 +651,9 @@ export async function registerUserByAdmin(formData: FormData) {
   if (user_type === 'MEMBER') {
     if (!user_email) return { error: 'A valid personal email address is required for group members.' };
     if (!password) return { error: 'Password is required for member accounts.' };
-    if (password.length < 8) return { error: 'Password must be at least 8 characters long.' };
+    
+    const passwordError = checkPasswordStrength(password);
+    if (passwordError) return { error: passwordError };
 
     const { data: authUser, error: authError } = await supabaseAdmin.auth.admin.createUser({
       email: user_email,
@@ -622,9 +725,8 @@ export async function registerAdminBySuperAdmin(formData: FormData) {
     return { error: 'Full name and password are required.' };
   }
 
-  if (password.length < 6) {
-    return { error: 'Password must be at least 6 characters long.' };
-  }
+  const passwordError = checkPasswordStrength(password);
+  if (passwordError) return { error: passwordError };
 
   const { isSuperAdmin } = await getCurrentUserRole();
   if (!isSuperAdmin) {
@@ -677,9 +779,8 @@ export async function registerSuperAdminBySuperAdmin(formData: FormData) {
     return { error: 'Full name and password are required.' };
   }
 
-  if (password.length < 6) {
-    return { error: 'Password must be at least 6 characters long.' };
-  }
+  const passwordError = checkPasswordStrength(password);
+  if (passwordError) return { error: passwordError };
 
   const { isSuperAdmin } = await getCurrentUserRole();
   if (!isSuperAdmin) {
@@ -719,7 +820,7 @@ export async function registerSuperAdminBySuperAdmin(formData: FormData) {
   return { success: `Superadmin account created! Assigned SA ID: ${account_id}` };
 }
 
-// 7. Update Admin Committee Position with Audit Trail & Custom Appointment Date
+// 7. Update Admin Committee Position
 export async function updateAdminPosition(formData: FormData) {
   try {
     const { isSuperAdmin, email: adminEmail } = await getCurrentUserRole();
@@ -776,7 +877,7 @@ export async function updateAdminPosition(formData: FormData) {
   }
 }
 
-// 8. Update Admin Profile Details (Including Appointment Date Edits)
+// 8. Update Admin Profile Details
 export async function updateAdminProfileDetails(formData: FormData) {
   try {
     const { isSuperAdmin, email: adminEmail } = await getCurrentUserRole();
@@ -1118,7 +1219,7 @@ export async function settleAndDeactivateMember(formData: FormData) {
   return { success: `Account settled! Total Refund Paid: NPR ${netRefundPaid.toLocaleString('en-IN')}` };
 }
 
-// 13. Single Monthly Savings Deposit (With Immutable Admin Snapshot & Depositor Identity)
+// 13. Single Monthly Savings Deposit
 export async function recordDeposit(formData: FormData) {
   const member_id = formData.get('member_id') as string;
   const for_month = formData.get('for_month') as string;
@@ -1151,8 +1252,8 @@ export async function recordDeposit(formData: FormData) {
     .eq('id', user?.id)
     .single();
 
-  const adminName = adminProfile?.full_name || 'System Admin';
-  const adminDesignation = adminProfile?.committee_position || (adminProfile?.role === 'SUPER_ADMIN' ? 'Superadmin' : 'Executive');
+  const adminName = adminProfile?.full_name?.replace(/\s*\((Admin|Superadmin)\)/gi, '').trim() || 'System Admin';
+  const adminDesignation = adminProfile?.committee_position || (adminProfile?.role === 'SUPER_ADMIN' ? 'Chairperson / President' : 'Committee Secretary');
 
   const deposit_code = await generateDepositCode(0);
 
@@ -1183,7 +1284,7 @@ export async function recordDeposit(formData: FormData) {
       deposit_code,
       for_month,
       amount_paid,
-      created_at: newDep.created_at?.slice(0, 10),
+      created_at: newDep.created_at,
       member_name: newDep.profiles?.full_name || 'Member',
       member_account_id: newDep.profiles?.account_id || 'N/A',
       deposited_by_name,
@@ -1193,7 +1294,7 @@ export async function recordDeposit(formData: FormData) {
   };
 }
 
-// 14. BULK MEETING DEPOSITS (With Sequential Offset Fix)
+// 14. BULK MEETING DEPOSITS
 export async function recordBulkDeposits(payload: { 
   for_month: string; 
   deposits: { member_id: string; amount_paid: number; deposited_by_name?: string | null }[] 
@@ -1225,8 +1326,8 @@ export async function recordBulkDeposits(payload: {
     .eq('id', user?.id)
     .single();
 
-  const adminName = adminProfile?.full_name || 'System Admin';
-  const adminDesignation = adminProfile?.committee_position || (adminProfile?.role === 'SUPER_ADMIN' ? 'Superadmin' : 'Executive');
+  const adminName = adminProfile?.full_name?.replace(/\s*\((Admin|Superadmin)\)/gi, '').trim() || 'System Admin';
+  const adminDesignation = adminProfile?.committee_position || (adminProfile?.role === 'SUPER_ADMIN' ? 'Chairperson / President' : 'Committee Secretary');
 
   const { data: memberProfiles } = await supabaseAdmin
     .from('profiles')
@@ -1238,7 +1339,6 @@ export async function recordBulkDeposits(payload: {
   const insertRows = [];
   const generatedReceipts = [];
 
-  // Sequential Offset Loop guarantees unique IDs for bulk records (e.g. DP2608-001, DP2608-002, etc.)
   for (let i = 0; i < depositList.length; i++) {
     const d = depositList[i];
     const deposit_code = await generateDepositCode(i);
@@ -1279,7 +1379,7 @@ export async function recordBulkDeposits(payload: {
   };
 }
 
-// 15. ADVANCE FUTURE-MONTH DEPOSITS (With Sequential Offset Fix)
+// 15. ADVANCE FUTURE-MONTH DEPOSITS
 export async function recordAdvanceDeposits(formData: FormData) {
   const member_id = formData.get('member_id') as string;
   const start_month = formData.get('start_month') as string;
@@ -1311,8 +1411,8 @@ export async function recordAdvanceDeposits(formData: FormData) {
     .eq('id', user?.id)
     .single();
 
-  const adminName = adminProfile?.full_name || 'System Admin';
-  const adminDesignation = adminProfile?.committee_position || (adminProfile?.role === 'SUPER_ADMIN' ? 'Superadmin' : 'Executive');
+  const adminName = adminProfile?.full_name?.replace(/\s*\((Admin|Superadmin)\)/gi, '').trim() || 'System Admin';
+  const adminDesignation = adminProfile?.committee_position || (adminProfile?.role === 'SUPER_ADMIN' ? 'Chairperson / President' : 'Committee Secretary');
 
   const insertRows = [];
   for (let i = 0; i < targetMonths.length; i++) {
@@ -1338,7 +1438,7 @@ export async function recordAdvanceDeposits(formData: FormData) {
   return { success: `Advance Payment Recorded!` };
 }
 
-// 16. Issue Loan (With Single Active Loan Constraint, PDF Upload & Approver Tracking)
+// 16. Issue Loan
 export async function issueLoan(formData: FormData) {
   try {
     const { isAdmin } = await getCurrentUserRole();
@@ -1436,7 +1536,8 @@ export async function issueLoan(formData: FormData) {
     const N = tenure_months;
     const monthly_emi = R === 0 ? Math.round(principal_amount / N) : Math.round((principal_amount * R * Math.pow(1 + R, N)) / (Math.pow(1 + R, N) - 1));
 
-    const adminDesignation = currentAdmin.committee_position || (currentAdmin.role === 'SUPER_ADMIN' ? 'Superadmin' : 'Committee Admin');
+    const adminName = currentAdmin.full_name?.replace(/\s*\((Admin|Superadmin)\)/gi, '').trim() || 'System Admin';
+    const adminDesignation = currentAdmin.committee_position || (currentAdmin.role === 'SUPER_ADMIN' ? 'Chairperson / President' : 'Committee Secretary');
 
     const { data: loan, error: insertError } = await supabaseAdmin.from('loans').insert([
       {
@@ -1451,7 +1552,7 @@ export async function issueLoan(formData: FormData) {
         status: 'ACTIVE',
         application_doc_path: storageFileName,
         approved_by_id: currentAdmin.id,
-        approved_by_name: currentAdmin.full_name,
+        approved_by_name: adminName,
         approved_by_designation: adminDesignation,
       },
     ]).select().single();
@@ -1495,8 +1596,8 @@ export async function recordLoanRepayment(formData: FormData) {
     .eq('id', user?.id)
     .single();
 
-  const adminName = adminProfile?.full_name || 'System Admin';
-  const adminDesignation = adminProfile?.committee_position || (adminProfile?.role === 'SUPER_ADMIN' ? 'Superadmin' : 'Executive');
+  const adminName = adminProfile?.full_name?.replace(/\s*\((Admin|Superadmin)\)/gi, '').trim() || 'System Admin';
+  const adminDesignation = adminProfile?.committee_position || (adminProfile?.role === 'SUPER_ADMIN' ? 'Chairperson / President' : 'Committee Secretary');
 
   const payment_code = await generatePaymentCode();
 
@@ -1523,7 +1624,7 @@ export async function recordLoanRepayment(formData: FormData) {
 
   revalidatePath('/loans');
   revalidatePath('/members');
-  
+
   return {
     success: `Repayment recorded under Payment ID: ${payment_code}`,
     receipt: {
@@ -1546,7 +1647,7 @@ export async function recordLoanRepayment(formData: FormData) {
 // 18. Generate Signed URLs for Storage Files
 export async function getKycSignedUrl(filePath: string) {
   if (!filePath) return null;
-  
+
   const { data } = await supabaseAdmin.storage.from('member-docs').createSignedUrl(filePath, 3600);
   if (data?.signedUrl) return data.signedUrl;
 
@@ -1614,39 +1715,79 @@ export async function recordAsset(formData: FormData) {
 
 // 21. Record Committee Expense
 export async function recordExpense(formData: FormData) {
-  const title = (formData.get('title') as string)?.trim();
-  const category = formData.get('category') as string;
-  const amount = Number(formData.get('amount'));
-  const expense_date = formData.get('expense_date') as string;
-  const notes = (formData.get('notes') as string)?.trim();
+  try {
+    const title = (formData.get('title') as string)?.trim();
+    const category = formData.get('category') as string;
+    const amount = Number(formData.get('amount'));
+    const expense_date = formData.get('expense_date') as string;
+    const notes = (formData.get('notes') as string)?.trim() || null;
 
-  if (!title || !amount || !expense_date) {
-    return { error: 'Title, amount, and expense date are required.' };
+    if (!title || !amount || !expense_date) {
+      return { error: 'Title, amount, and expense date are required.' };
+    }
+
+    const { isAdmin, email: adminEmail } = await getCurrentUserRole();
+    if (!isAdmin) {
+      return { error: 'Unauthorized: Admins only.' };
+    }
+
+    const supabaseServer = await getSupabaseServerClient();
+    const { data: { user } } = await supabaseServer.auth.getUser();
+
+    const { data: adminProfile } = await supabaseAdmin
+      .from('profiles')
+      .select('id, full_name, committee_position, role')
+      .eq('id', user?.id)
+      .single();
+
+    const adminName = adminProfile?.full_name?.replace(/\s*\((Admin|Superadmin)\)/gi, '').trim() || 'System Admin';
+    const adminDesignation = adminProfile?.committee_position || (adminProfile?.role === 'SUPER_ADMIN' ? 'Chairperson / President' : 'Committee Secretary');
+
+    const expense_code = await generateExpenseCode();
+
+    const { data: expense, error } = await supabaseAdmin.from('expenses').insert([{
+      expense_code,
+      title,
+      category,
+      amount,
+      expense_date,
+      notes,
+      recorded_by_id: adminProfile?.id,
+      recorded_by_name: adminName,
+      recorded_by_designation: adminDesignation,
+    }]).select().single();
+
+    if (error) return { error: error.message };
+
+    await supabaseAdmin.from('audit_logs').insert([{
+      entity_type: 'EXPENSE',
+      entity_id: String(expense.id),
+      action: 'EXPENSE_RECORDED',
+      new_value: { 
+        expense_code, 
+        title, 
+        amount, 
+        category, 
+        expense_date,
+        recorded_by: `${adminName} (${adminDesignation})`
+      },
+      reason: notes || 'Official Committee Expense Logged',
+      changed_by_email: adminEmail || 'System Admin'
+    }]);
+
+    revalidatePath('/expenses');
+    revalidatePath('/treasury');
+    revalidatePath('/');
+
+    return { 
+      success: `Expense recorded successfully! Voucher ID: ${expense_code}`,
+      expense_code,
+      recorded_by_name: adminName,
+      recorded_by_designation: adminDesignation,
+    };
+  } catch (err: any) {
+    return { error: err.message || 'Failed to record expense.' };
   }
-
-  const { email } = await getCurrentUserRole();
-
-  const { data: expense, error } = await supabaseAdmin.from('expenses').insert([{
-    title,
-    category,
-    amount,
-    expense_date,
-    notes: notes || null
-  }]).select().single();
-
-  if (error) return { error: error.message };
-
-  await supabaseAdmin.from('audit_logs').insert([{
-    entity_type: 'EXPENSE',
-    entity_id: String(expense.id),
-    action: 'EXPENSE_RECORDED',
-    new_value: { title, amount, category, expense_date },
-    changed_by_email: email || 'System Admin'
-  }]);
-
-  revalidatePath('/expenses');
-  revalidatePath('/');
-  return { success: 'Expense recorded successfully!' };
 }
 
 // 22. Update Asset Valuation
@@ -1718,7 +1859,7 @@ export async function updateDeposit(formData: FormData) {
   return { success: 'Deposit record updated successfully!' };
 }
 
-// 24. Distribute Dividends (Proportional Member Profit Share)
+// 24. Distribute Dividends
 export async function distributeDividends(formData: FormData) {
   const title = (formData.get('title') as string)?.trim();
   const total_profit_pool = Number(formData.get('total_profit_pool'));
@@ -1796,7 +1937,7 @@ export async function distributeDividends(formData: FormData) {
   return { success: `Dividend "${title}" of NPR ${total_profit_pool.toLocaleString('en-IN')} distributed across ${members.length} members!` };
 }
 
-// 25. Update Disbursed Loan Info (Superadmin Only)
+// 25. Update Disbursed Loan Info
 export async function updateLoan(formData: FormData) {
   const loan_id = Number(formData.get('loan_id'));
   const principal_amount = Number(formData.get('principal_amount'));
@@ -1844,7 +1985,7 @@ export async function updateLoan(formData: FormData) {
   return { success: 'Disbursed loan record updated successfully!' };
 }
 
-// 26. Update Recorded Loan Repayment (Superadmin Only)
+// 26. Update Recorded Loan Repayment
 export async function updateLoanPayment(formData: FormData) {
   const payment_id = Number(formData.get('payment_id'));
   const principal_paid = Number(formData.get('principal_paid')) || 0;

@@ -95,7 +95,7 @@ export default function UserProfileDropdown({ userProfile, isAdmin }: UserProfil
 
           {/* Menu Options */}
           <div className="p-1 space-y-0.5">
-            {/* View 360° Profile is hidden for Admins */}
+            {/* View 360° Profile is hidden for Admins and rendered ONLY for General Members */}
             {!isAdmin && (
               <Link
                 href="/profile"
@@ -108,7 +108,7 @@ export default function UserProfileDropdown({ userProfile, isAdmin }: UserProfil
             )}
 
             <Link
-              href="/profile?tab=security"
+              href="/change-password"
               onClick={() => setIsOpen(false)}
               className="flex items-center gap-2.5 px-3 py-2 rounded-xl text-slate-200 hover:bg-slate-800 hover:text-white transition-colors"
             >
