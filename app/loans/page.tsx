@@ -18,6 +18,15 @@ export default async function LoansPage() {
         getAll() {
           return cookieStore.getAll();
         },
+        setAll(cookiesToSet) {
+          try {
+            cookiesToSet.forEach(({ name, value, options }) =>
+              cookieStore.set(name, value, options)
+            );
+          } catch {
+            // Handled safely in Server Components
+          }
+        },
       },
     }
   );
@@ -32,9 +41,14 @@ export default async function LoansPage() {
     .or('status.eq.ACTIVE,status.is.null')
     .order('full_name');
 
+  // FIXED: Added the explicit join for borrower and guarantor details
   const { data: loans } = await supabaseAdmin
     .from('loans')
-    .select('*')
+    .select(`
+      *,
+      borrower:profiles!borrower_id(full_name, account_id, user_type),
+      guarantor:profiles!guarantor_id(full_name, account_id)
+    `)
     .order('issue_date', { ascending: false })
     .order('id', { ascending: false });
 

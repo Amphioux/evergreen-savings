@@ -17,7 +17,6 @@ import {
   UserX, 
   UserCheck,
   TrendingUp, 
-  Calendar, 
   ShieldCheck, 
   CheckCircle2, 
   AlertCircle,
@@ -28,6 +27,16 @@ interface AdminDetailsModalProps {
   admin: any;
   auditLogs?: any[];
   isSuperAdmin: boolean;
+}
+
+// Helper to fix the UTC vs Local Timezone issue
+function formatLocalDate(dateString: string) {
+  if (!dateString) return 'N/A';
+  return new Date(dateString).toLocaleDateString('en-CA', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric'
+  });
 }
 
 export default function AdminDetailsModal({ admin, auditLogs = [], isSuperAdmin }: AdminDetailsModalProps) {
@@ -237,7 +246,7 @@ export default function AdminDetailsModal({ admin, auditLogs = [], isSuperAdmin 
                     </div>
                     <div>
                       <span className="text-slate-400 block text-[10px] uppercase">Appointment Date</span>
-                      <strong className="font-mono text-slate-900">{admin.joined_date || 'N/A'}</strong>
+                      <strong className="font-mono text-slate-900">{admin.joined_date ? formatLocalDate(admin.joined_date) : 'N/A'}</strong>
                     </div>
                     <div>
                       <span className="text-slate-400 block text-[10px] uppercase">Account Status</span>
@@ -253,39 +262,74 @@ export default function AdminDetailsModal({ admin, auditLogs = [], isSuperAdmin 
 
               {/* PROMOTION & POSITION HISTORY TIMELINE */}
               {activeTab === 'TIMELINE' && (
-                <div className="space-y-3">
-                  <h4 className="font-bold text-slate-800 flex items-center gap-1.5 text-xs">
-                    <History size={15} className="text-purple-700" /> Promotion & Executive Title Cycle
+                <div className="space-y-4">
+                  <h4 className="font-bold text-slate-800 flex items-center gap-1.5 text-sm mb-2">
+                    <History size={16} className="text-purple-700" /> Executive Timeline
                   </h4>
 
-                  <div className="relative border-l-2 border-purple-200 ml-3 space-y-4 pl-4 pt-1">
-                    <div className="relative">
-                      <div className="absolute -left-[23px] top-0.5 w-3 h-3 rounded-full bg-purple-700 border-2 border-white" />
-                      <div className="font-bold text-slate-900">Appointed as {admin.committee_position || 'Executive Board'}</div>
-                      <div className="text-[11px] text-slate-500 font-mono flex items-center gap-1 mt-0.5">
-                        <Calendar size={11} /> {admin.joined_date || 'Initial System Setup'}
+                  <div className="ml-2 border-l-2 border-slate-200 space-y-6">
+                    {/* Latest reassignment logs */}
+                    {positionHistory.map((log: any) => {
+                      const oldPosition = log.old_value?.position || 'UNASSIGNED';
+                      const newPosition = log.new_value?.position || 'UNKNOWN';
+                      const effectiveDate = log.new_value?.effective_date || log.created_at?.split('T')[0];
+                      
+                      return (
+                        <div key={log.id} className="relative pl-6">
+                          <div className="absolute -left-[9px] top-0 w-4 h-4 rounded-full bg-purple-600 ring-4 ring-white" />
+                          
+                          {/* Log Timestamp formatted locally */}
+                          <div className="text-xs font-bold text-slate-500 mb-1">
+                            {formatLocalDate(log.created_at)}
+                          </div>
+                          
+                          <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 mt-2">
+                            <h4 className="font-bold text-slate-900 text-sm">
+                              Position Reassignment
+                            </h4>
+                            
+                            {/* Visual A -> B transition block */}
+                            <div className="flex items-center flex-wrap gap-2 mt-3 mb-3 p-2.5 bg-white border border-slate-200 rounded-lg w-fit">
+                              <span className="text-slate-500 font-medium text-xs px-2 py-1 bg-slate-100 rounded">
+                                {oldPosition}
+                              </span>
+                              <ArrowRight size={14} className="text-slate-400" />
+                              <span className="text-purple-900 font-bold text-xs px-2 py-1 bg-purple-100 rounded border border-purple-200">
+                                {newPosition}
+                              </span>
+                            </div>
+
+                            <div className="flex flex-col gap-1 text-[11px] text-slate-500">
+                              <div>
+                                Effective Date: <strong className="text-slate-700">{formatLocalDate(effectiveDate)}</strong>
+                              </div>
+                              <div className="mt-1 pt-2 border-t border-slate-200">
+                                Approved by: <span className="font-semibold text-slate-700">{log.changed_by_email}</span>
+                              </div>
+                              {log.reason && (
+                                <div className="mt-1 text-slate-500 italic">
+                                  "{log.reason}"
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+
+                    {/* Initial setup log at bottom of timeline */}
+                    <div className="relative pl-6">
+                      <div className="absolute -left-[9px] top-0 w-4 h-4 rounded-full bg-slate-400 ring-4 ring-white" />
+                      <div className="text-xs font-bold text-slate-500 mb-1">
+                        {admin.joined_date ? formatLocalDate(admin.joined_date) : 'Initial Setup'}
+                      </div>
+                      <div className="bg-white border border-slate-200 rounded-xl p-4 mt-2">
+                        <h4 className="font-bold text-slate-900 text-sm">System Onboarding</h4>
+                        <p className="text-xs text-slate-500 mt-1">
+                          Account initialized. Initial position assigned during registration.
+                        </p>
                       </div>
                     </div>
-
-                    {positionHistory.map((log) => (
-                      <div key={log.id} className="relative">
-                        <div className="absolute -left-[23px] top-0.5 w-3 h-3 rounded-full bg-amber-500 border-2 border-white" />
-                        <div className="font-bold text-slate-900 flex items-center gap-1.5 flex-wrap">
-                          <span>Reassigned:</span>
-                          <span className="text-slate-500 line-through">{log.old_value?.position}</span>
-                          <ArrowRight size={12} className="text-purple-700" />
-                          <span className="text-purple-900 font-extrabold">{log.new_value?.position}</span>
-                        </div>
-                        <div className="text-[11px] text-slate-500 font-mono mt-0.5">
-                          Appointment Date: <strong>{log.new_value?.effective_date || log.created_at?.slice(0, 10)}</strong> • Approved by {log.changed_by_email}
-                        </div>
-                        {log.reason && (
-                          <div className="p-2 bg-slate-50 border rounded-md text-[11px] text-slate-600 mt-1 italic">
-                            "{log.reason}"
-                          </div>
-                        )}
-                      </div>
-                    ))}
                   </div>
                 </div>
               )}

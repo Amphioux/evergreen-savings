@@ -785,7 +785,7 @@ export async function registerAdminBySuperAdmin(formData: FormData) {
 
   const { error: profileError } = await supabaseAdmin.from('profiles').insert([{
     id: authUser.user.id,
-    full_name: `${full_name} (Admin)`,
+    full_name, // Removed the "(Admin)" tag
     phone: phone || null,
     email: authEmail,
     account_id,
@@ -839,7 +839,7 @@ export async function registerSuperAdminBySuperAdmin(formData: FormData) {
 
   const { error: profileError } = await supabaseAdmin.from('profiles').insert([{
     id: authUser.user.id,
-    full_name: `${full_name} (Superadmin)`,
+    full_name, // Removed the "(Superadmin)" tag
     phone: phone || null,
     email: authEmail,
     account_id,

@@ -38,6 +38,9 @@ export default function LoanDetailsModal({ loan }: LoanDetailsModalProps) {
 
   if (!loan) return null;
 
+  // Make it bulletproof: handles both "borrower" and "profiles" aliases from the DB
+  const borrowerData = loan.borrower || loan.profiles || {};
+
   // Compute specific loan aggregates safely
   const loanPayments = loan.loanPayments || [];
   const totalInterestPaid = loanPayments.reduce(
@@ -53,7 +56,7 @@ export default function LoanDetailsModal({ loan }: LoanDetailsModalProps) {
 
   // Check if borrower is an internal member
   const isInternalMember =
-    loan.borrower?.user_type === 'MEMBER' || (!loan.guarantor_id && !loan.guarantor);
+    borrowerData.user_type === 'MEMBER' || (!loan.guarantor_id && !loan.guarantor);
 
   const handleViewPdf = async () => {
     if (!loan.application_doc_path) return;
@@ -182,10 +185,10 @@ export default function LoanDetailsModal({ loan }: LoanDetailsModalProps) {
                     <User size={16} className="text-blue-700 mt-0.5 flex-shrink-0" />
                     <div>
                       <div className="text-xs text-slate-500 font-semibold">Borrower</div>
-                      <div className="font-bold text-slate-900 text-sm">{loan.borrower?.full_name || 'Borrower'}</div>
+                      <div className="font-bold text-slate-900 text-sm">{borrowerData.full_name || 'Borrower'}</div>
                       <div className="font-mono text-xs text-slate-500">
                         {isInternalMember
-                          ? `Member ID: ${loan.borrower?.account_id || 'N/A'}`
+                          ? `Member ID: ${borrowerData.account_id || 'N/A'}`
                           : 'External Borrower'}
                       </div>
                     </div>
