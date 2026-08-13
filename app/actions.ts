@@ -50,7 +50,7 @@ async function getSupabaseServerClient() {
   );
 }
 
-// Helper: Get active editor details for audit trail tracking
+// Helper: Get active editor details for audit trail tracking (Updated with Session Fallback)
 async function getActiveEditorDetails() {
   const { email } = await getCurrentUserRole();
   const supabaseServer = await getSupabaseServerClient();
@@ -60,22 +60,47 @@ async function getActiveEditorDetails() {
     return { editorId: null, editorName: 'System Admin', editorDesignation: 'Executive Officer', auditUser: 'System Admin' };
   }
 
-  const { data: profile } = await supabaseAdmin
+  // 1. Primary Lookup: Get profile by user auth ID
+  let { data: profile } = await supabaseAdmin
     .from('profiles')
-    .select('id, full_name, committee_position, role, account_id')
+    .select('id, full_name, committee_position, role, account_id, email')
     .eq('id', user.id)
-    .single();
+    .maybeSingle();
 
-  const editorName = profile?.full_name?.replace(/\s*\((Admin|Superadmin)\)/gi, '').trim() || 'System Admin';
-  const editorDesignation = profile?.committee_position || (profile?.role === 'SUPER_ADMIN' ? 'Chairperson / President' : 'Committee Secretary');
+  // 2. Secondary Fallback: Lookup by Email if Auth ID wasn't matched directly
+  if (!profile && user.email) {
+    const { data: profileByEmail } = await supabaseAdmin
+      .from('profiles')
+      .select('id, full_name, committee_position, role, account_id, email')
+      .ilike('email', user.email)
+      .maybeSingle();
+    profile = profileByEmail;
+  }
 
+  // Determine Name
+  const rawName = profile?.full_name || user.user_metadata?.full_name || 'System Admin';
+  const editorName = rawName.replace(/\s*\((Admin|Superadmin)\)/gi, '').trim();
+
+  // Determine Designation
+  let editorDesignation = profile?.committee_position;
+  if (!editorDesignation) {
+    if (profile?.role === 'SUPER_ADMIN' || user.user_metadata?.role === 'SUPER_ADMIN') {
+      editorDesignation = 'Chairperson / President';
+    } else if (profile?.role === 'ADMIN' || user.user_metadata?.role === 'ADMIN') {
+      editorDesignation = 'Committee Secretary';
+    } else {
+      editorDesignation = 'Executive Officer';
+    }
+  }
+
+  // Determine Audit Identifier (e.g. SA-002 - Sulav Chaudhary)
+  const accountId = profile?.account_id || user.user_metadata?.account_id;
   let auditUser = 'System Admin';
-  const rawEmail = email || user.email || '';
   
-  if (profile?.account_id) {
-    auditUser = `${profile.account_id} - ${editorName}`;
-  } else if (rawEmail) {
-    auditUser = rawEmail.replace('@evergreen.local', '');
+  if (accountId) {
+    auditUser = `${accountId} - ${editorName}`;
+  } else if (profile?.email || user.email || email) {
+    auditUser = (profile?.email || user.email || email || '').replace('@evergreen.local', '');
   }
 
   return { 
@@ -136,6 +161,36 @@ async function generateExpenseCode(): Promise<string> {
         const parts = e.expense_code.split('-');
         if (parts.length === 2) {
           const seqNum = parseInt(parts[1], 10);
+          if (!isNaN(seqNum) && seqNum > maxSeq) {
+            maxSeq = seqNum;
+          }
+        }
+      }
+    }
+  }
+
+  const nextSeq = (maxSeq + 1).toString().padStart(3, '0');
+  return `${prefix}-${nextSeq}`;
+}
+
+// Helper: Auto-generate sequential Dividend Distribution ID (Format: DIVYYMM-XXX)
+async function generateDividendCode(): Promise<string> {
+  const now = new Date();
+  const yy = now.getFullYear().toString().slice(-2);
+  const mm = (now.getMonth() + 1).toString().padStart(2, '0');
+  const prefix = `DIV${yy}${mm}`;
+
+  const { data: matches } = await supabaseAdmin
+    .from('dividend_distributions')
+    .select('distribution_code');
+
+  let maxSeq = 0;
+  if (matches) {
+    for (const d of matches) {
+      if (d.distribution_code) {
+        const match = d.distribution_code.match(/(\d+)$/);
+        if (match) {
+          const seqNum = parseInt(match[1], 10);
           if (!isNaN(seqNum) && seqNum > maxSeq) {
             maxSeq = seqNum;
           }
@@ -331,6 +386,10 @@ async function generatePaymentCode(): Promise<string> {
 // Public Helper Actions
 export async function getNextDepositCode(): Promise<string> {
   return await generateDepositCode();
+}
+
+export async function getNextDividendCode(): Promise<string> {
+  return await generateDividendCode();
 }
 
 export async function getNextAccountId(): Promise<string> {
@@ -785,7 +844,7 @@ export async function registerAdminBySuperAdmin(formData: FormData) {
 
   const { error: profileError } = await supabaseAdmin.from('profiles').insert([{
     id: authUser.user.id,
-    full_name, // Removed the "(Admin)" tag
+    full_name,
     phone: phone || null,
     email: authEmail,
     account_id,
@@ -839,7 +898,7 @@ export async function registerSuperAdminBySuperAdmin(formData: FormData) {
 
   const { error: profileError } = await supabaseAdmin.from('profiles').insert([{
     id: authUser.user.id,
-    full_name, // Removed the "(Superadmin)" tag
+    full_name,
     phone: phone || null,
     email: authEmail,
     account_id,
@@ -2178,82 +2237,168 @@ export async function updateDeposit(formData: FormData) {
   }
 }
 
-// 24. Distribute Dividends
+// 24. Distribute Dividends (With Sequential Voucher Code, Recorder Badge, Audit Trail, Cutoff Filter & Strict Balancing)
 export async function distributeDividends(formData: FormData) {
-  const title = (formData.get('title') as string)?.trim();
-  const total_profit_pool = Number(formData.get('total_profit_pool'));
-  const distributed_at = (formData.get('distributed_at') as string) || new Date().toISOString().split('T')[0];
+  try {
+    const title = formData.get('title') as string;
+    const total_profit_pool = Number(formData.get('total_profit_pool'));
+    const distributed_at = formData.get('distributed_at') as string;
+    const cutoff_month = formData.get('cutoff_month') as string; // 'YYYY-MM'
 
-  if (!title || !total_profit_pool || total_profit_pool <= 0) {
-    return { error: 'Distribution title and a valid profit pool amount are required.' };
-  }
+    if (!title || !total_profit_pool || total_profit_pool <= 0 || !cutoff_month) {
+      return { error: 'Please provide title, profit pool amount, and cutoff month.' };
+    }
 
-  const { isAdmin } = await getCurrentUserRole();
-  if (!isAdmin) return { error: 'Unauthorized: Only Committee Admins can distribute dividends.' };
+    const { isAdmin } = await getCurrentUserRole();
+    if (!isAdmin) return { error: 'Unauthorized: Committee Admins only.' };
 
-  const { data: members } = await supabaseAdmin
-    .from('profiles')
-    .select('id, full_name, account_id')
-    .eq('user_type', 'MEMBER')
-    .or('status.eq.ACTIVE,status.is.null');
+    const { editorId, editorName, editorDesignation, auditUser } = await getActiveEditorDetails();
 
-  if (!members || members.length === 0) return { error: 'No active savings members found.' };
+    // 1. Fetch only ACTIVE INTERNAL MEMBERS
+    const { data: profiles, error: profileErr } = await supabaseAdmin
+      .from('profiles')
+      .select('id, full_name, account_id, user_type, role, status')
+      .or('status.eq.ACTIVE,status.is.null');
 
-  const { data: deposits } = await supabaseAdmin
-    .from('deposits')
-    .select('member_id, amount_paid');
+    if (profileErr) throw profileErr;
 
-  const memberSavingsMap: Record<string, number> = {};
-  let overallGroupSavings = 0;
+    const internalMembers = (profiles || []).filter(
+      (p) => p.user_type === 'MEMBER' && p.role !== 'ADMIN' && p.role !== 'SUPER_ADMIN' && p.role !== 'SUPERADMIN'
+    );
 
-  (deposits || []).forEach((d) => {
-    const amt = Number(d.amount_paid || 0);
-    memberSavingsMap[d.member_id] = (memberSavingsMap[d.member_id] || 0) + amt;
-    overallGroupSavings += amt;
-  });
+    if (internalMembers.length === 0) {
+      return { error: 'No active internal group members found for dividend distribution.' };
+    }
 
-  if (overallGroupSavings <= 0) {
-    return { error: 'Total group savings balance is 0. Dividend distribution cannot proceed.' };
-  }
+    // 2. Fetch ALL deposits strictly UP TO the Cutoff Month
+    const cutoffDateMax = `${cutoff_month}-31`;
 
-  const code = `DIV${new Date().getFullYear().toString().slice(-2)}-001`;
+    const { data: deposits, error: depErr } = await supabaseAdmin
+      .from('deposits')
+      .select('member_id, amount_paid')
+      .lte('for_month', cutoffDateMax);
 
-  const { data: dist, error: distError } = await supabaseAdmin
-    .from('dividend_distributions')
-    .insert([{
-      distribution_code: code,
-      title,
-      total_profit_pool,
-      total_group_savings: overallGroupSavings,
-      distributed_at
-    }])
-    .select()
-    .single();
+    if (depErr) throw depErr;
 
-  if (distError) return { error: distError.message };
+    // A) Calculate TOTAL GROUP SAVINGS (Everyone's money in the whole system)
+    const totalGroupSavings = (deposits || []).reduce((sum, d) => sum + Number(d.amount_paid || 0), 0);
 
-  const payoutRows = members.map((m) => {
-    const memberSavings = memberSavingsMap[m.id] || 0;
-    const shareRatio = memberSavings / overallGroupSavings;
-    const dividend_amount = Math.round(shareRatio * total_profit_pool);
+    const savingsByMember: Record<string, number> = {};
+    (deposits || []).forEach((d) => {
+      const mId = String(d.member_id);
+      savingsByMember[mId] = (savingsByMember[mId] || 0) + Number(d.amount_paid || 0);
+    });
 
-    return {
-      distribution_id: dist.id,
-      member_id: m.id,
-      member_savings_snapshot: memberSavings,
-      dividend_amount,
-      payout_status: 'PAID'
+    // B) Calculate TOTAL ELIGIBLE SAVINGS (Only the internal members getting dividends)
+    let totalEligibleSavings = 0;
+    const eligibleMembers = internalMembers.map((m) => {
+      const savings = savingsByMember[m.id] || 0;
+      totalEligibleSavings += savings;
+      return { ...m, savings };
+    });
+
+    if (totalEligibleSavings <= 0) {
+      return { error: 'Total accumulated savings for internal members up to this cutoff month is zero.' };
+    }
+
+    // Generate sequential code (e.g. DIV2608-001)
+    const distCode = await generateDividendCode();
+
+    // 4. Build Individual Payout Entries & Verify Strict Ledger Balance
+    let actualAllocatedTotal = 0;
+    
+    const payoutRecords = eligibleMembers.map((m) => {
+      const customAmountStr = formData.get(`dividend_amount_${m.id}`);
+      const autoAmount = (m.savings / totalEligibleSavings) * total_profit_pool;
+      
+      const finalAmount = customAmountStr !== null && customAmountStr !== '' 
+        ? Number(customAmountStr) 
+        : autoAmount;
+
+      const roundedFinalAmount = Math.round(finalAmount * 100) / 100;
+      actualAllocatedTotal += roundedFinalAmount;
+
+      const method = (formData.get(`payment_method_${m.id}`) as string) || 'CASH';
+      const note = (formData.get(`deposit_note_${m.id}`) as string) || '';
+
+      return {
+        member_id: m.id,
+        member_savings_snapshot: m.savings,
+        share_percentage: Number(((m.savings / totalEligibleSavings) * 100).toFixed(2)),
+        dividend_amount: roundedFinalAmount,
+        payment_method: method,
+        deposit_note: note,
+        payout_status: 'PAID',
+        recorded_by_id: editorId,
+        recorded_by_name: editorName,             // e.g. "Sulav Chaudhary"
+        recorded_by_designation: editorDesignation // e.g. "Chairperson / President"
+      };
+    });
+
+    // STRICT LEDGER MATCHING (Prevents execution if amounts don't exactly sum to the profit pool)
+    const roundedAllocated = Math.round(actualAllocatedTotal * 100) / 100;
+    const roundedPool = Math.round(total_profit_pool * 100) / 100;
+    
+    // We allow a microscopic tolerance (0.05) just in case of JS floating math, but generally users should match exactly
+    if (Math.abs(roundedAllocated - roundedPool) > 0.05) {
+      return { 
+        error: `Ledger Mismatch! The sum of all individual payouts (NPR ${roundedAllocated}) does not equal the declared Total Profit Pool (NPR ${roundedPool}). Please adjust individual amounts to balance exactly.` 
+      };
+    }
+
+    // 3. Insert Master Distribution Event (Now saving BOTH group and eligible totals accurately)
+    const { data: distEvent, error: distErr } = await supabaseAdmin
+      .from('dividend_distributions')
+      .insert({
+        distribution_code: distCode,
+        title,
+        total_profit_pool: roundedPool, // Use rounded exact pool
+        total_group_savings: totalGroupSavings,       // Overall Cooperative Equity
+        total_eligible_savings: totalEligibleSavings, // Dividend Distribution Equity
+        eligible_member_count: eligibleMembers.length,
+        distributed_at,
+        cutoff_month,
+        recorded_by_id: editorId,
+        recorded_by_name: editorName,
+        recorded_by_designation: editorDesignation
+      })
+      .select('id')
+      .single();
+
+    if (distErr) throw distErr;
+
+    // Map distribution_id to payouts now that we have it
+    const finalPayouts = payoutRecords.map(p => ({ ...p, distribution_id: distEvent.id }));
+
+    const { error: payoutErr } = await supabaseAdmin.from('dividend_payouts').insert(finalPayouts);
+    if (payoutErr) throw payoutErr;
+
+    await supabaseAdmin.from('audit_logs').insert([{
+      entity_type: 'DIVIDEND_DISTRIBUTION',
+      entity_id: String(distEvent.id),
+      action: 'DIVIDEND_DISTRIBUTED',
+      new_value: {
+        distribution_code: distCode,
+        title,
+        cutoff_month,
+        total_profit_pool: roundedPool,
+        total_group_savings: totalGroupSavings,
+        total_eligible_savings: totalEligibleSavings,
+        recorded_by: `${editorName} (${editorDesignation})`
+      },
+      reason: `Distributed NPR ${roundedPool.toLocaleString('en-IN')} (Cutoff: ${cutoff_month})`,
+      changed_by_email: auditUser
+    }]);
+
+    revalidatePath('/treasury');
+    revalidatePath('/dashboard');
+    return { 
+      success: `Successfully distributed NPR ${roundedPool.toLocaleString('en-IN')}! Voucher: ${distCode}`,
+      distCode
     };
-  });
-
-  const { error: payoutError } = await supabaseAdmin.from('dividend_payouts').insert(payoutRows);
-  if (payoutError) return { error: payoutError.message };
-
-  revalidatePath('/treasury');
-  revalidatePath('/members');
-  revalidatePath('/admin/user-lookup');
-  revalidatePath('/');
-  return { success: `Dividend "${title}" of NPR ${total_profit_pool.toLocaleString('en-IN')} distributed across ${members.length} members!` };
+  } catch (err: any) {
+    return { error: err.message || 'Failed to execute dividend distribution.' };
+  }
 }
 
 // 25. UPDATE LOAN (With Last Changed By Audit Tracking)
@@ -2471,4 +2616,104 @@ export async function deleteOrganogramPosition(positionId: string) {
 
   revalidatePath('/members');
   return { success: 'Position slot deleted.' };
+}
+
+// 31. DELETE BANK INTEREST (Superadmin Only)
+export async function deleteBankInterest(formData: FormData) {
+  try {
+    const id = Number(formData.get('id'));
+    if (!id) return { error: 'Record ID is required.' };
+
+    const { isSuperAdmin } = await getCurrentUserRole();
+    if (!isSuperAdmin) return { error: 'Unauthorized: Only Superadmins can delete records.' };
+
+    const { editorName, editorDesignation, auditUser } = await getActiveEditorDetails();
+
+    const { data: oldRecord } = await supabaseAdmin.from('bank_interest').select('*').eq('id', id).single();
+    if (!oldRecord) return { error: 'Record not found.' };
+
+    const { error } = await supabaseAdmin.from('bank_interest').delete().eq('id', id);
+    if (error) return { error: error.message };
+
+    await supabaseAdmin.from('audit_logs').insert([{
+      entity_type: 'BANK_INTEREST',
+      entity_id: String(id),
+      action: 'RECORD_DELETED',
+      old_value: oldRecord,
+      reason: `Bank interest record deleted by ${editorName} (${editorDesignation})`,
+      changed_by_email: auditUser
+    }]);
+
+    revalidatePath('/treasury');
+    return { success: 'Bank interest record deleted permanently.' };
+  } catch (err: any) {
+    return { error: err.message || 'Failed to delete record.' };
+  }
+}
+
+// 32. DELETE PROPERTY ASSET (Superadmin Only)
+export async function deleteAsset(formData: FormData) {
+  try {
+    const id = Number(formData.get('id'));
+    if (!id) return { error: 'Asset ID is required.' };
+
+    const { isSuperAdmin } = await getCurrentUserRole();
+    if (!isSuperAdmin) return { error: 'Unauthorized: Only Superadmins can delete assets.' };
+
+    const { editorName, editorDesignation, auditUser } = await getActiveEditorDetails();
+
+    const { data: oldAsset } = await supabaseAdmin.from('assets').select('*').eq('id', id).single();
+    if (!oldAsset) return { error: 'Asset not found.' };
+
+    const { error } = await supabaseAdmin.from('assets').delete().eq('id', id);
+    if (error) return { error: error.message };
+
+    await supabaseAdmin.from('audit_logs').insert([{
+      entity_type: 'ASSET',
+      entity_id: String(id),
+      action: 'ASSET_DELETED',
+      old_value: oldAsset,
+      reason: `Property Asset deleted by ${editorName} (${editorDesignation})`,
+      changed_by_email: auditUser
+    }]);
+
+    revalidatePath('/treasury');
+    return { success: 'Property asset deleted permanently.' };
+  } catch (err: any) {
+    return { error: err.message || 'Failed to delete record.' };
+  }
+}
+
+// 33. DELETE ENTIRE DIVIDEND DISTRIBUTION BATCH (Superadmin Only)
+export async function deleteDividendDistribution(formData: FormData) {
+  try {
+    const id = Number(formData.get('id'));
+    if (!id) return { error: 'Distribution ID is required.' };
+
+    const { isSuperAdmin } = await getCurrentUserRole();
+    if (!isSuperAdmin) return { error: 'Unauthorized: Only Superadmins can rollback dividend distributions.' };
+
+    const { editorName, editorDesignation, auditUser } = await getActiveEditorDetails();
+
+    const { data: oldDist } = await supabaseAdmin.from('dividend_distributions').select('*').eq('id', id).single();
+    if (!oldDist) return { error: 'Dividend distribution event not found.' };
+
+    // This will CASCADE DELETE all individual payouts attached to this distribution_id
+    const { error } = await supabaseAdmin.from('dividend_distributions').delete().eq('id', id);
+    if (error) return { error: error.message };
+
+    await supabaseAdmin.from('audit_logs').insert([{
+      entity_type: 'DIVIDEND_DISTRIBUTION',
+      entity_id: String(id),
+      action: 'DISTRIBUTION_BATCH_DELETED',
+      old_value: oldDist,
+      reason: `Entire Dividend Batch Rollback executed by ${editorName} (${editorDesignation})`,
+      changed_by_email: auditUser
+    }]);
+
+    revalidatePath('/treasury');
+    return { success: 'Dividend distribution and all associated payouts deleted permanently.' };
+  } catch (err: any) {
+    return { error: err.message || 'Failed to rollback dividend distribution.' };
+  }
 }
