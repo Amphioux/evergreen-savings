@@ -4,6 +4,10 @@ import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
+import DashboardExpandableSection from './DashboardExpandableSection';
+import ManageSavingsTierModal from './deposits/ManageSavingsTierModal';
+import ManageFineRulesModal from './deposits/ManageFineRulesModal';
+import { getMonthsBetween, getSavingsRateForMonth, calculateSavingsFine, calculateLoanFine } from '@/lib/savingsUtils';
 import { 
   Users, 
   PiggyBank, 
@@ -16,12 +20,12 @@ import {
   ArrowUpRight, 
   ShieldAlert, 
   CalendarCheck,
-  Calendar,
   Activity,
-  Percent,
   Sparkles,
   Award,
-  UserCheck
+  UserCheck,
+  PhoneCall,
+  Scale
 } from 'lucide-react';
 import { formatMonthLabel } from '@/lib/formatters';
 
@@ -100,7 +104,7 @@ export default async function DashboardPage() {
   }
 
   const authUserId = user.id;
-  const { isAdmin } = await getCurrentUserRole();
+  const { isAdmin, isSuperAdmin } = await getCurrentUserRole();
   const today = new Date();
   const currentMonthStr = today.toISOString().slice(0, 7);
 
@@ -119,10 +123,37 @@ export default async function DashboardPage() {
   const thirtyDaysAgo = new Date();
   thirtyDaysAgo.setDate(today.getDate() - 30);
 
-  // 1. Fetch active member profiles
+  // 1. Fetch Contribution Rules & Fine Rules
+  const [{ data: contributionRulesData }, { data: fineRulesData }] = await Promise.all([
+    supabaseAdmin.from('contribution_rules').select('*').order('effective_from_month', { ascending: false }),
+    supabaseAdmin.from('fine_rules').select('*').order('created_at', { ascending: false })
+  ]);
+
+  // Normalize contribution_rules rows to match deposits page logic identically
+  const rulesList = (contributionRulesData || []).map((r: any) => ({
+    id: r.id,
+    effective_from_month: r.effective_from_month || (r.effective_from ? String(r.effective_from).slice(0, 7) : '2020-01'),
+    effective_to_month: r.effective_to_month || (r.effective_to ? String(r.effective_to).slice(0, 7) : null),
+    monthly_amount: Number(r.monthly_amount ?? r.amount ?? 500),
+    notes: r.notes || r.reason || 'General Assembly Rule',
+    recorded_by_name: r.recorded_by_name || 'Board',
+    recorded_by_designation: r.recorded_by_designation || 'Executive Officer',
+  }));
+
+  const fineRulesList = fineRulesData || [];
+
+  // Identify currently active rate rule (where effective_to_month is null)
+  const currentActiveRule = rulesList.find((r) => !r.effective_to_month) || rulesList[0] || { 
+    monthly_amount: 500 
+  };
+
+  const savingsFineRule = fineRulesList.find(r => r.rule_type === 'SAVINGS' && !r.effective_to_month) || { rate_value: 50 };
+  const loanFineRule = fineRulesList.find(r => r.rule_type === 'LOAN' && !r.effective_to_month) || { rate_value: 2 };
+
+  // 2. Fetch active member profiles
   const { data: profiles } = await supabaseAdmin
     .from('profiles')
-    .select('id, full_name, account_id, user_type, role, status, phone')
+    .select('id, full_name, account_id, user_type, role, status, phone, joined_date')
     .or('status.eq.ACTIVE,status.is.null')
     .order('full_name');
 
@@ -138,7 +169,7 @@ export default async function DashboardPage() {
     (p) => p.user_type === 'NON_MEMBER'
   );
 
-  // 2. Fetch all deposits
+  // 3. Fetch all deposits
   const { data: deposits } = await supabaseAdmin
     .from('deposits')
     .select('id, member_id, amount_paid, for_month, created_at')
@@ -147,23 +178,57 @@ export default async function DashboardPage() {
   const depositList = deposits || [];
   const totalSavingsCollected = depositList.reduce((sum, d) => sum + Number(d.amount_paid || 0), 0);
 
-  // Check deposit defaulters for current month
-  const currentMonthDepositedMemberIds = new Set(
-    depositList
-      .filter((d) => d.for_month && d.for_month.slice(0, 7) === currentMonthStr)
-      .map((d) => d.member_id)
-  );
+  // Dynamic Historical Joined-Date Defaulter Engine (Strict Grace-Period Filtered)
+  const fullDefaultersList = internalMembers.map((member) => {
+    const joinedMonth = member.joined_date ? member.joined_date.slice(0, 7) : '2025-01';
+    
+    // All months expected to pay since joined_date up to current month
+    const requiredMonths = getMonthsBetween(joinedMonth, currentMonthStr);
+    
+    // Months actually paid
+    const paidMonthsSet = new Set(
+      depositList
+        .filter((d) => String(d.member_id) === String(member.id) && d.for_month)
+        .map((d) => d.for_month.slice(0, 7))
+    );
 
-  const currentMonthDefaulters = internalMembers.filter(
-    (m) => !currentMonthDepositedMemberIds.has(m.id)
-  );
+    // Identify missed months
+    const missedMonths = requiredMonths.filter((m) => !paidMonthsSet.has(m));
 
-  // Compliance Rate Calculation (%)
-  const monthlyComplianceRate = internalMembers.length > 0
-    ? Math.round(((internalMembers.length - currentMonthDefaulters.length) / internalMembers.length) * 100)
-    : 100;
+    // Calculate exact total overdue principal amount
+    const totalDefaultedAmount = missedMonths.reduce((sum, month) => {
+      return sum + getSavingsRateForMonth(month, rulesList);
+    }, 0);
 
-  // 3. Fetch loans
+    // Calculate accrued late fine across missed months taking grace periods into account
+    const totalAccruedFine = missedMonths.reduce((sumFine, monthStr) => {
+      const baseAmount = getSavingsRateForMonth(monthStr, rulesList);
+      return sumFine + calculateSavingsFine(monthStr, baseAmount, fineRulesList);
+    }, 0);
+
+    // Missed months that have passed their grace window and carry active late fees
+    const fineActiveMissedMonths = missedMonths.filter((monthStr) => {
+      const baseAmount = getSavingsRateForMonth(monthStr, rulesList);
+      return calculateSavingsFine(monthStr, baseAmount, fineRulesList) > 0;
+    });
+
+    return {
+      ...member,
+      joinedMonth,
+      totalMissedMonthsCount: missedMonths.length,
+      missedMonthsList: missedMonths,
+      fineActiveMissedMonths,
+      totalDefaultedAmount,
+      totalAccruedFine,
+      totalPayableWithFine: totalDefaultedAmount + totalAccruedFine,
+      // STRICT RULE: Only count as an actionable penalty defaulter if late fine is > 0 (grace period passed)
+      isGracePassedDefaulter: totalAccruedFine > 0,
+    };
+  })
+    .filter((m) => m.isGracePassedDefaulter) // <--- Only include defaulters whose grace period has expired!
+    .sort((a, b) => b.totalPayableWithFine - a.totalPayableWithFine);
+
+  // 4. Fetch loans
   const { data: loans } = await supabaseAdmin
     .from('loans')
     .select('*')
@@ -172,7 +237,7 @@ export default async function DashboardPage() {
   const loanList = loans || [];
   const totalDisbursedLoans = loanList.reduce((sum, l) => sum + Number(l.principal_amount || 0), 0);
 
-  // 4. Fetch loan repayments
+  // 5. Fetch loan repayments
   const { data: payments } = await supabaseAdmin
     .from('loan_payments')
     .select('id, loan_id, payment_code, principal_paid, interest_paid, payment_date')
@@ -182,47 +247,43 @@ export default async function DashboardPage() {
   const totalPrincipalRepaid = paymentList.reduce((sum, p) => sum + Number(p.principal_paid || 0), 0);
   const totalInterestCollected = paymentList.reduce((sum, p) => sum + Number(p.interest_paid || 0), 0);
 
-  // 5. Fetch bank interest credits
+  // 6. Fetch bank interest credits
   const { data: bankInterests } = await supabaseAdmin
     .from('bank_interest')
     .select('amount');
 
   const totalBankInterest = (bankInterests || []).reduce((sum, b) => sum + Number(b.amount || 0), 0);
 
-  // 6. Fetch operational expenses
+  // 7. Fetch operational expenses
   const { data: expenses } = await supabaseAdmin
     .from('expenses')
     .select('amount');
 
   const totalExpenses = (expenses || []).reduce((sum, e) => sum + Number(e.amount || 0), 0);
 
-  // 7. Fetch property/asset valuation
+  // 8. Fetch property/asset valuation
   const { data: assets } = await supabaseAdmin
     .from('assets')
     .select('current_value');
 
   const totalAssetsValuation = (assets || []).reduce((sum, a) => sum + Number(a.current_value || 0), 0);
 
-  // 8. ACCURATE DIVIDEND CALCULATIONS
-  // Master Distribution Events
+  // 9. ACCURATE DIVIDEND CALCULATIONS
   const { data: dividendDistributions } = await supabaseAdmin
     .from('dividend_distributions')
     .select('*')
     .order('distributed_at', { ascending: false });
 
-  // Individual Payouts Joined with Master Metadata
   const { data: dividendPayouts } = await supabaseAdmin
     .from('dividend_payouts')
     .select('*, dividend_distributions(distribution_code, title, distributed_at, cutoff_month)')
     .order('created_at', { ascending: false });
 
-  // Master Total: Sum total_profit_pool directly from dividend_distributions
   const totalDividendsDisbursed = (dividendDistributions || []).reduce(
     (sum, d) => sum + Number(d.total_profit_pool || 0), 
     0
   );
 
-  // Member-Specific Payouts: Dual match against profile ID or auth user ID
   const myDividendPayouts = (dividendPayouts || []).filter(
     (dp) => String(dp.member_id) === String(currentMemberProfileId) || String(dp.member_id) === String(authUserId)
   );
@@ -282,6 +343,16 @@ export default async function DashboardPage() {
   });
 
   const loanDefaultersList = loanEmiTrackers.filter((t) => t.isOverdue);
+  const totalOverdueLoanBalance = loanDefaultersList.reduce((sum, l) => sum + l.balance, 0);
+
+  // Financial Ratio Calculations (MFI / WOCCU PEARLS Standards)
+  const portfolioAtRiskPct = activeLoanPortfolio > 0 
+    ? ((totalOverdueLoanBalance / activeLoanPortfolio) * 100).toFixed(1)
+    : '0.0';
+
+  const loanToDepositRatio = totalSavingsCollected > 0 
+    ? Math.round((activeLoanPortfolio / totalSavingsCollected) * 100) 
+    : 0;
 
   // Financial Summaries
   const totalGroupEarnings = totalInterestCollected + totalBankInterest;
@@ -300,6 +371,9 @@ export default async function DashboardPage() {
   const myActiveLoans = loanEmiTrackers.filter((t) => String(t.borrowerId) === String(currentMemberProfileId) || String(t.borrowerId) === String(authUserId));
   const myTotalLoanBalance = myActiveLoans.reduce((sum, t) => sum + t.balance, 0);
   const myPrimaryLoan = myActiveLoans[0];
+
+  // Borrowing Capacity Rule (3x Accumulated Savings)
+  const myMaxBorrowingCapacity = Math.max(0, (myTotalSavings * 3) - myTotalLoanBalance);
 
   // INTERNAL MEMBER COMPLIANCE RADAR DATA
   const memberComplianceList = internalMembers.map((m) => {
@@ -405,8 +479,8 @@ export default async function DashboardPage() {
           </div>
           <p className="text-xs text-slate-500 font-mono mt-1">
             {isAdmin 
-              ? 'Real-time liquid cash flow, dividend events, loan metrics, and compliance trackers'
-              : 'Personal savings & dividend summary, upcoming due payments, and group radar'}
+              ? 'Real-time liquid cash flow, portfolio at risk (PAR30), dividend events, and compliance trackers'
+              : 'Personal savings & dividend summary, loan borrowing power, and upcoming due payments'}
           </p>
         </div>
 
@@ -434,10 +508,34 @@ export default async function DashboardPage() {
         )}
       </div>
 
+
+      {/* ACTIVE CONTRIBUTION RATE RULE BANNER */}
+      {isAdmin && (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-xs p-4 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+          <div className="flex-1 min-w-0">
+            <span className="text-[10px] font-extrabold uppercase text-purple-900 bg-purple-50 px-2 py-0.5 rounded border border-purple-200 font-mono">
+              Active Savings Rate Tier
+            </span>
+            <h3 className="text-base font-black text-slate-900 mt-1">
+              NPR {Number(currentActiveRule.monthly_amount).toLocaleString('en-IN')} / Month Per Member
+            </h3>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Historical rates (e.g. NPR 300 prior to 2025) are preserved and applied to past missed months automatically.
+            </p>
+          </div>
+      
+          {/* Compact, tightly aligned control buttons */}
+          <div className="flex flex-col gap-2 shrink-0 self-stretch sm:self-auto min-w-[210px]">
+            <ManageFineRulesModal fineRules={fineRulesList} isAdmin={isAdmin} />
+            <ManageSavingsTierModal currentRules={rulesList} isSuperAdmin={isSuperAdmin} />
+          </div>
+        </div>
+      )}
+
       {/* ==================== GENERAL MEMBER VIEW ==================== */}
       {!isAdmin && (
         <>
-          {/* Member Primary KPI Row (Includes Dividend Earnings) */}
+          {/* Member Primary KPI Row */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <div className="p-4 bg-emerald-900 text-white rounded-2xl space-y-1 shadow-xs">
               <div className="flex justify-between items-center text-emerald-300 text-xs font-bold uppercase">
@@ -458,6 +556,16 @@ export default async function DashboardPage() {
               <p className="text-[11px] text-purple-200 font-medium">{myDividendPayouts.length} Profit Distributions Received</p>
             </div>
 
+            {/* Borrowing Power Card */}
+            <div className="p-4 bg-blue-950 text-white rounded-2xl space-y-1 shadow-xs">
+              <div className="flex justify-between items-center text-blue-300 text-xs font-bold uppercase">
+                <span>Max Loan Capacity</span>
+                <Scale size={18} />
+              </div>
+              <div className="text-2xl font-black font-mono">NPR {myMaxBorrowingCapacity.toLocaleString('en-IN')}</div>
+              <p className="text-[11px] text-blue-200 font-medium">3x Savings Balance Allowance</p>
+            </div>
+
             <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl space-y-1 shadow-xs">
               <div className="flex justify-between items-center text-amber-800 text-xs font-bold uppercase">
                 <span>Active Borrowed Loan</span>
@@ -469,17 +577,6 @@ export default async function DashboardPage() {
               <p className="text-[11px] text-amber-800 font-semibold">
                 {myPrimaryLoan ? `Code: ${myPrimaryLoan.loanCode}${myActiveLoans.length > 1 ? ` (+${myActiveLoans.length - 1} more)` : ''}` : 'No Active Loans'}
               </p>
-            </div>
-
-            <div className="p-4 bg-blue-50 border border-blue-200 rounded-2xl space-y-1 shadow-xs">
-              <div className="flex justify-between items-center text-blue-800 text-xs font-bold uppercase">
-                <span>Next Due Deposit</span>
-                <Calendar size={18} />
-              </div>
-              <div className="text-xl font-black text-blue-950 font-mono">
-                {formatMonthLabel(myNextDepositMonth)}
-              </div>
-              <p className="text-[11px] text-blue-700 font-bold">Standard Contribution: NPR 500</p>
             </div>
           </div>
 
@@ -501,9 +598,17 @@ export default async function DashboardPage() {
               </div>
             </div>
 
-            <div className="divide-y divide-slate-100 font-sans">
+            <DashboardExpandableSection
+              initialCount={3}
+              label="Dividend Payouts"
+              emptyMessage={
+                <div className="p-6 text-center text-slate-400 text-xs font-medium">
+                  No dividend payouts received yet. Future distributions will appear here automatically.
+                </div>
+              }
+            >
               {myDividendPayouts.map((dp: any) => (
-                <div key={dp.id} className="p-3.5 hover:bg-purple-50/30 flex justify-between items-center text-xs transition-colors">
+                <div key={dp.id} className="p-3.5 hover:bg-purple-50/30 flex justify-between items-center text-xs transition-colors border-b border-slate-100 last:border-0">
                   <div>
                     <div className="font-bold text-slate-900">{dp.dividend_distributions?.title || 'Profit Distribution'}</div>
                     <div className="text-[10px] text-slate-500 font-mono mt-0.5">
@@ -520,13 +625,7 @@ export default async function DashboardPage() {
                   </div>
                 </div>
               ))}
-
-              {myDividendPayouts.length === 0 && (
-                <div className="p-6 text-center text-slate-400 text-xs font-medium">
-                  No dividend payouts received yet. Future distributions will appear here automatically.
-                </div>
-              )}
-            </div>
+            </DashboardExpandableSection>
           </div>
 
           {/* MY PERSONAL DUE ACTION CARD */}
@@ -542,7 +641,6 @@ export default async function DashboardPage() {
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-sans">
-              {/* Savings Contribution Due */}
               <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
                 <div className="flex justify-between items-center">
                   <span className="font-bold text-slate-700">Monthly Savings Contribution</span>
@@ -556,11 +654,10 @@ export default async function DashboardPage() {
                   Target Month: {formatMonthLabel(myNextDepositMonth)}
                 </div>
                 <p className="text-[11px] text-slate-500">
-                  Please deposit NPR 500 in the upcoming group meeting or via executive collector.
+                  Please deposit NPR {Number(currentActiveRule.monthly_amount || 500)} in the upcoming group meeting or via executive collector.
                 </p>
               </div>
 
-              {/* Loan EMI Due with Next Due Date */}
               <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
                 <div className="flex justify-between items-center">
                   <span className="font-bold text-slate-700">Loan Repayment EMI</span>
@@ -621,7 +718,7 @@ export default async function DashboardPage() {
                     <th className="p-3 text-center">Loan EMI Status</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100">
+                <DashboardExpandableSection isTable={true} colSpan={4} initialCount={3} label="Members">
                   {memberComplianceList.map((peer) => (
                     <tr key={peer.id} className="hover:bg-slate-50">
                       <td className="p-3 font-medium text-slate-900">
@@ -647,7 +744,7 @@ export default async function DashboardPage() {
                       </td>
                     </tr>
                   ))}
-                </tbody>
+                </DashboardExpandableSection>
               </table>
             </div>
           </div>
@@ -664,9 +761,17 @@ export default async function DashboardPage() {
               </span>
             </div>
 
-            <div className="divide-y divide-slate-100 max-h-80 overflow-y-auto">
+            <DashboardExpandableSection
+              initialCount={3}
+              label="Transactions"
+              emptyMessage={
+                <div className="p-6 text-center text-slate-400 text-xs font-medium">
+                  No group deposits or loan repayments recorded in the last 30 days.
+                </div>
+              }
+            >
               {activityFeed30Days.map((item) => (
-                <div key={item.id} className="p-3 hover:bg-slate-50 flex justify-between items-center text-xs transition-colors">
+                <div key={item.id} className="p-3 hover:bg-slate-50 flex justify-between items-center text-xs transition-colors border-b border-slate-100 last:border-0">
                   <div className="flex items-center gap-3">
                     <div className={`p-2 rounded-lg ${
                       item.type === 'DEPOSIT' ? 'bg-emerald-100 text-emerald-800' : 'bg-purple-100 text-purple-800'
@@ -685,13 +790,7 @@ export default async function DashboardPage() {
                   </div>
                 </div>
               ))}
-
-              {activityFeed30Days.length === 0 && (
-                <div className="p-6 text-center text-slate-400 text-xs font-medium">
-                  No group deposits or loan repayments recorded in the last 30 days.
-                </div>
-              )}
-            </div>
+            </DashboardExpandableSection>
           </div>
         </>
       )}
@@ -700,9 +799,7 @@ export default async function DashboardPage() {
       {isAdmin && (
         <>
           {/* Row 1: Primary Group Financial KPIs */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            
-            {/* Liquid Cash Pool */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
             <div className="p-4 bg-white border border-slate-200 rounded-xl shadow-xs space-y-1">
               <div className="flex items-center justify-between text-slate-500">
                 <span className="text-[10px] font-extrabold uppercase tracking-wider text-blue-900">
@@ -718,7 +815,6 @@ export default async function DashboardPage() {
               </p>
             </div>
 
-            {/* Savings Deposits */}
             <div className="p-4 bg-emerald-50/80 border-2 border-emerald-300 rounded-xl shadow-xs space-y-1">
               <div className="flex items-center justify-between text-emerald-800">
                 <span className="text-[10px] font-extrabold uppercase tracking-wider">
@@ -732,7 +828,6 @@ export default async function DashboardPage() {
               <p className="text-[11px] text-emerald-800 font-semibold">{internalMembers.length} Active Internal Members</p>
             </div>
 
-            {/* Active Loan Balance */}
             <div className="p-4 bg-amber-50/80 border border-amber-200 rounded-xl shadow-xs space-y-1">
               <div className="flex items-center justify-between text-amber-800">
                 <span className="text-[10px] font-extrabold uppercase tracking-wider">
@@ -746,7 +841,25 @@ export default async function DashboardPage() {
               <p className="text-[11px] text-amber-900 font-semibold">{uniqueActiveBorrowersCount} Active Borrowers</p>
             </div>
 
-            {/* Total Dividends Disbursed Card */}
+            <div className={`p-4 border rounded-xl shadow-xs space-y-1 ${
+              Number(portfolioAtRiskPct) > 5 ? 'bg-red-50 border-red-300' : 'bg-white border-slate-200'
+            }`}>
+              <div className="flex items-center justify-between text-slate-500">
+                <span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-700">
+                  Portfolio at Risk (PAR)
+                </span>
+                <AlertTriangle size={18} className={Number(portfolioAtRiskPct) > 5 ? 'text-red-600' : 'text-slate-400'} />
+              </div>
+              <div className={`text-xl font-black font-mono ${
+                Number(portfolioAtRiskPct) > 5 ? 'text-red-700' : 'text-slate-900'
+              }`}>
+                {portfolioAtRiskPct}%
+              </div>
+              <p className="text-[11px] text-slate-500 font-medium">
+                NPR {totalOverdueLoanBalance.toLocaleString('en-IN')} Default Exposure
+              </p>
+            </div>
+
             <div className="p-4 bg-purple-50/80 border border-purple-200 rounded-xl shadow-xs space-y-1">
               <div className="flex items-center justify-between text-purple-800">
                 <span className="text-[10px] font-extrabold uppercase tracking-wider">
@@ -761,10 +874,9 @@ export default async function DashboardPage() {
                 {(dividendDistributions || []).length} Distribution Events Logged
               </p>
             </div>
-
           </div>
 
-          {/* Row 2: Comprehensive Group Net Worth Breakdown */}
+          {/* Row 2: Net Worth Breakdown */}
           <div className="p-4 bg-slate-900 text-white rounded-xl shadow-xs flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 text-xs font-mono">
             <div className="space-y-0.5">
               <div className="text-slate-400 uppercase text-[10px] font-sans font-bold">Group Net Worth</div>
@@ -772,10 +884,17 @@ export default async function DashboardPage() {
                 NPR {netGroupWorth.toLocaleString('en-IN')}
               </div>
             </div>
-            <div className="grid grid-cols-3 gap-4 text-center border-t sm:border-t-0 sm:border-l border-slate-800 pt-3 sm:pt-0 sm:pl-6">
+
+            <div className="grid grid-cols-4 gap-4 text-center border-t sm:border-t-0 sm:border-l border-slate-800 pt-3 sm:pt-0 sm:pl-6">
               <div>
-                <span className="text-slate-400 text-[10px] block font-sans">Interest & Bank Earnings</span>
+                <span className="text-slate-400 text-[10px] block font-sans">Interest & Earnings</span>
                 <strong className="text-purple-300">NPR {totalGroupEarnings.toLocaleString('en-IN')}</strong>
+              </div>
+              <div>
+                <span className="text-slate-400 text-[10px] block font-sans">Loan-to-Deposit (LDR)</span>
+                <strong className={loanToDepositRatio > 85 ? 'text-amber-400 font-bold' : 'text-emerald-400 font-bold'}>
+                  {loanToDepositRatio}%
+                </strong>
               </div>
               <div>
                 <span className="text-slate-400 text-[10px] block font-sans">Property/Assets</span>
@@ -788,10 +907,10 @@ export default async function DashboardPage() {
             </div>
           </div>
 
-          {/* HIGH-PRIORITY ADMIN ALERT RADAR (LOAN & SAVINGS DEFAULTERS) */}
+          {/* HIGH-PRIORITY ADMIN ALERT RADAR */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             
-            {/* 1. LOAN DEFAULTERS WATCHLIST */}
+            {/* 1. LOAN DEFAULTERS WATCHLIST WITH ACCRUED FINES */}
             <div className="bg-white rounded-2xl border-2 border-red-200 shadow-xs p-4 space-y-3">
               <div className="flex items-center justify-between border-b border-red-100 pb-3">
                 <div className="flex items-center gap-2">
@@ -802,7 +921,7 @@ export default async function DashboardPage() {
                     <h3 className="font-extrabold text-red-950 text-xs uppercase tracking-wider">
                       Loan Repayment Defaulters ({loanDefaultersList.length})
                     </h3>
-                    <p className="text-[10px] text-red-700">Members or external borrowers with overdue loan EMI payments</p>
+                    <p className="text-[10px] text-red-700">Overdue EMIs + {loanFineRule.rate_value}% Late Penalty Charge</p>
                   </div>
                 </div>
                 {loanDefaultersList.length > 0 && (
@@ -812,51 +931,71 @@ export default async function DashboardPage() {
                 )}
               </div>
 
-              <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-                {loanDefaultersList.map((item) => (
-                  <div key={item.loanId} className="p-3 bg-red-50/60 border border-red-200 rounded-xl flex justify-between items-center text-xs">
-                    <div>
-                      <div className="font-extrabold text-slate-900 flex items-center gap-1.5">
-                        {item.borrowerName}
-                        <span className={`text-[9px] px-1.5 py-0.2 rounded font-mono font-bold ${
-                          item.borrowerType === 'NON_MEMBER' ? 'bg-purple-100 text-purple-900' : 'bg-slate-200 text-slate-700'
-                        }`}>
-                          {item.borrowerType === 'NON_MEMBER' ? 'EXTERNAL' : 'INTERNAL'}
-                        </span>
-                      </div>
-                      <div className="text-[10px] font-mono text-slate-600 mt-0.5">
-                        Code: <strong className="text-slate-800">{item.loanCode}</strong> • Acc: {item.accountId} • Ph: {item.phone}
-                      </div>
-                      {item.guarantorName && (
-                        <div className="text-[10px] font-mono text-blue-900 mt-0.5">
-                          Guarantor: <strong>{item.guarantorName}</strong> ({item.guarantorAccountId})
-                        </div>
-                      )}
-                      <div className="text-[10px] text-red-800 font-bold mt-1">
-                        Due Date: {item.nextDueDate} <span className="bg-red-200 text-red-950 px-1.5 py-0.2 rounded font-mono text-[9px] ml-1">({item.daysOverdue} Days Overdue)</span>
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <div className="font-mono font-black text-red-900 text-sm">
-                        NPR {item.monthlyEmi.toLocaleString('en-IN')}
-                      </div>
-                      <span className="text-[10px] font-sans font-bold text-slate-500 block">
-                        Bal: NPR {item.balance.toLocaleString('en-IN')}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-
-                {loanDefaultersList.length === 0 && (
+              <DashboardExpandableSection
+                initialCount={3}
+                label="Defaulters"
+                emptyMessage={
                   <div className="p-5 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-800 text-xs font-semibold flex items-center justify-center gap-2">
                     <CalendarCheck size={18} className="text-emerald-600" />
                     No loan defaulters! All loan EMIs are up to date.
                   </div>
-                )}
-              </div>
+                }
+              >
+                {loanDefaultersList.map((item) => {
+                  const targetDueMonth = item.nextDueDate ? item.nextDueDate.slice(0, 7) : currentMonthStr;
+                  const projectedFine = calculateLoanFine(item.monthlyEmi, targetDueMonth, fineRulesList);
+                  const totalDueWithFine = item.monthlyEmi + projectedFine;
+
+                  return (
+                    <div key={item.loanId} className="p-3 bg-red-50/60 border border-red-200 rounded-xl flex justify-between items-center text-xs mb-2 last:mb-0">
+                      <div>
+                        <div className="font-extrabold text-slate-900 flex items-center gap-1.5">
+                          {item.borrowerName}
+                          <span className={`text-[9px] px-1.5 py-0.2 rounded font-mono font-bold ${
+                            item.borrowerType === 'NON_MEMBER' ? 'bg-purple-100 text-purple-900' : 'bg-slate-200 text-slate-700'
+                          }`}>
+                            {item.borrowerType === 'NON_MEMBER' ? 'EXTERNAL' : 'INTERNAL'}
+                          </span>
+                        </div>
+                        <div className="text-[10px] font-mono text-slate-600 mt-0.5">
+                          Code: <strong className="text-slate-800">{item.loanCode}</strong> • Acc: {item.accountId}
+                        </div>
+                        {item.phone && item.phone !== 'N/A' && (
+                          <a href={`tel:${item.phone}`} className="inline-flex items-center gap-1 text-[10px] text-blue-800 font-bold mt-0.5 hover:underline">
+                            <PhoneCall size={10} /> Call {item.phone}
+                          </a>
+                        )}
+                        {item.guarantorName && (
+                          <div className="text-[10px] font-mono text-purple-900 mt-0.5">
+                            Guarantor: <strong>{item.guarantorName}</strong> ({item.guarantorAccountId})
+                          </div>
+                        )}
+                        <div className="text-[10px] text-red-800 font-bold mt-1">
+                          Due: {item.nextDueDate} <span className="bg-red-200 text-red-950 px-1.5 py-0.2 rounded font-mono text-[9px] ml-1">({item.daysOverdue} Days Overdue)</span>
+                        </div>
+                      </div>
+
+                      <div className="text-right space-y-1">
+                        <div className="font-mono font-black text-red-900 text-sm">
+                          NPR {totalDueWithFine.toLocaleString('en-IN')}
+                        </div>
+                        <span className="text-[9px] text-red-700 font-bold block">
+                          EMI: NPR {item.monthlyEmi.toLocaleString('en-IN')}{projectedFine > 0 ? ` (+Fine NPR ${projectedFine})` : ''}
+                        </span>
+                        <Link 
+                          href="/loans" 
+                          className="px-2 py-0.5 bg-red-700 hover:bg-red-800 text-white rounded font-bold text-[9px] inline-block transition-colors"
+                        >
+                          Record Repayment
+                        </Link>
+                      </div>
+                    </div>
+                  );
+                })}
+              </DashboardExpandableSection>
             </div>
 
-            {/* 2. SAVINGS DEFAULTERS WATCHLIST (INTERNAL MEMBERS ONLY) */}
+            {/* 2. ACCUMULATED HISTORICAL SAVINGS DEFAULTERS WATCHLIST (Grace-Period Filtered) */}
             <div className="bg-white rounded-2xl border-2 border-amber-200 shadow-xs p-4 space-y-3">
               <div className="flex items-center justify-between border-b border-amber-100 pb-3">
                 <div className="flex items-center gap-2">
@@ -865,38 +1004,62 @@ export default async function DashboardPage() {
                   </div>
                   <div>
                     <h3 className="font-extrabold text-amber-950 text-xs uppercase tracking-wider">
-                      Savings Defaulters ({currentMonthDefaulters.length})
+                      Savings Defaulters ({fullDefaultersList.length})
                     </h3>
-                    <p className="text-[10px] text-amber-800">Unpaid monthly deposit for {formatMonthLabel(currentMonthStr)} (Internal Members)</p>
+                    <p className="text-[10px] text-amber-800">Defaulters past grace period + accrued late penalties</p>
                   </div>
                 </div>
                 <span className="text-[10px] font-mono text-slate-500 font-bold">{currentMonthStr}</span>
               </div>
 
-              <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-                {currentMonthDefaulters.map((member) => (
-                  <div key={member.id} className="p-3 bg-amber-50/60 border border-amber-200 rounded-xl flex justify-between items-center text-xs">
+              <DashboardExpandableSection
+                initialCount={3}
+                label="Defaulters"
+                emptyMessage={
+                  <div className="p-5 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-800 text-xs font-semibold flex items-center justify-center gap-2">
+                    <CalendarCheck size={18} className="text-emerald-600" />
+                    All overdue members are compliant or currently within their allowed grace window!
+                  </div>
+                }
+              >
+                {fullDefaultersList.map((member) => (
+                  <div key={member.id} className="p-3 bg-amber-50/60 border border-amber-200 rounded-xl flex justify-between items-center text-xs mb-2 last:mb-0">
                     <div>
-                      <div className="font-extrabold text-slate-900">{member.full_name}</div>
+                      <div className="font-extrabold text-slate-900 flex items-center gap-2">
+                        {member.full_name}
+                        <span className="text-[9px] bg-amber-200 text-amber-950 px-1.5 py-0.2 rounded font-mono font-bold">
+                          {member.totalMissedMonthsCount} {member.totalMissedMonthsCount === 1 ? 'Month' : 'Months'} Overdue
+                        </span>
+                      </div>
                       <div className="text-[10px] text-slate-600 font-mono mt-0.5">
-                        Acc ID: <strong>{member.account_id || 'N/A'}</strong> • Phone: {member.phone || 'N/A'}
+                        Acc: <strong>{member.account_id || 'N/A'}</strong> • Joined: {member.joinedMonth}
+                      </div>
+                      {member.phone && (
+                        <a href={`tel:${member.phone}`} className="inline-flex items-center gap-1 text-[10px] text-blue-800 font-bold mt-0.5 hover:underline">
+                          <PhoneCall size={10} /> Call {member.phone}
+                        </a>
+                      )}
+                      <div className="text-[10px] text-amber-900 font-mono mt-0.5 truncate max-w-[280px]">
+                        Missed: {member.missedMonthsList.join(', ')}
                       </div>
                     </div>
-                    <div className="text-right">
-                      <span className="px-2.5 py-1 bg-amber-200/80 text-amber-950 text-[10px] font-extrabold rounded-lg inline-block">
-                        NPR 500 PENDING
+                    <div className="text-right space-y-1">
+                      <div className="font-mono font-black text-amber-950 text-sm">
+                        NPR {member.totalPayableWithFine.toLocaleString('en-IN')}
+                      </div>
+                      <span className="text-[9px] text-amber-900 font-bold block">
+                        Overdue: NPR {member.totalDefaultedAmount.toLocaleString('en-IN')}{member.totalAccruedFine > 0 ? ` (+Fine NPR ${member.totalAccruedFine})` : ''}
                       </span>
+                      <Link 
+                        href={`/deposits?member_id=${member.id}`} 
+                        className="px-2 py-0.5 bg-emerald-800 hover:bg-emerald-700 text-white rounded font-bold text-[9px] block text-center transition-colors"
+                      >
+                        + Deposit
+                      </Link>
                     </div>
                   </div>
                 ))}
-
-                {currentMonthDefaulters.length === 0 && (
-                  <div className="p-5 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-800 text-xs font-semibold flex items-center justify-center gap-2">
-                    <CalendarCheck size={18} className="text-emerald-600" />
-                    100% Monthly Savings Compliance Achieved for {formatMonthLabel(currentMonthStr)}!
-                  </div>
-                )}
-              </div>
+              </DashboardExpandableSection>
             </div>
 
           </div>
@@ -934,7 +1097,7 @@ export default async function DashboardPage() {
                     <th className="p-3">Recorded By</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100 font-mono">
+                <DashboardExpandableSection isTable={true} colSpan={7} initialCount={3} label="Events">
                   {(dividendDistributions || []).map((dist: any) => (
                     <tr key={dist.id} className="hover:bg-purple-50/20">
                       <td className="p-3 font-bold text-purple-900">{dist.distribution_code}</td>
@@ -951,15 +1114,7 @@ export default async function DashboardPage() {
                       </td>
                     </tr>
                   ))}
-
-                  {(dividendDistributions || []).length === 0 && (
-                    <tr>
-                      <td colSpan={7} className="p-6 text-center text-slate-400 font-sans">
-                        No dividend distributions recorded yet.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
+                </DashboardExpandableSection>
               </table>
             </div>
           </div>
@@ -991,7 +1146,7 @@ export default async function DashboardPage() {
                     <th className="p-3 text-center">Loan EMI Status</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100">
+                <DashboardExpandableSection isTable={true} colSpan={4} initialCount={3} label="Members">
                   {memberComplianceList.map((peer) => (
                     <tr key={peer.id} className="hover:bg-slate-50">
                       <td className="p-3 font-medium text-slate-900">
@@ -1017,7 +1172,7 @@ export default async function DashboardPage() {
                       </td>
                     </tr>
                   ))}
-                </tbody>
+                </DashboardExpandableSection>
               </table>
             </div>
           </div>
@@ -1050,7 +1205,7 @@ export default async function DashboardPage() {
                     <th className="p-3 text-center">Status</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100">
+                <DashboardExpandableSection isTable={true} colSpan={5} initialCount={3} label="Borrowers">
                   {externalBorrowersRadarList.map((eb) => (
                     <tr key={eb.id} className="hover:bg-purple-50/20">
                       <td className="p-3 font-medium text-slate-900">
@@ -1088,20 +1243,12 @@ export default async function DashboardPage() {
                       </td>
                     </tr>
                   ))}
-
-                  {externalBorrowersRadarList.length === 0 && (
-                    <tr>
-                      <td colSpan={5} className="p-6 text-center text-slate-400 font-sans">
-                        No external borrowers registered in the system.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
+                </DashboardExpandableSection>
               </table>
             </div>
           </div>
 
-          {/* Recent Activity Stream (UNMASKED FOR ADMINS) */}
+          {/* Recent Activity Stream */}
           <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
             <div className="p-4 border-b border-slate-200 font-bold text-slate-900 text-xs uppercase tracking-wider flex justify-between items-center">
               <div className="flex items-center gap-1.5">
@@ -1112,9 +1259,17 @@ export default async function DashboardPage() {
               </Link>
             </div>
 
-            <div className="divide-y divide-slate-100 font-sans">
-              {activityFeed30Days.slice(0, 10).map((item) => (
-                <div key={item.id} className="p-3 hover:bg-slate-50 flex justify-between items-center text-xs transition-colors">
+            <DashboardExpandableSection
+              initialCount={3}
+              label="Transactions"
+              emptyMessage={
+                <div className="p-6 text-center text-slate-400 text-xs font-medium">
+                  No recent transaction activity recorded yet.
+                </div>
+              }
+            >
+              {activityFeed30Days.map((item) => (
+                <div key={item.id} className="p-3 hover:bg-slate-50 flex justify-between items-center text-xs transition-colors border-b border-slate-100 last:border-0">
                   <div className="flex items-center gap-3">
                     <div className={`p-2 rounded-lg ${
                       item.type === 'DEPOSIT' ? 'bg-emerald-100 text-emerald-800' : 'bg-purple-100 text-purple-800'
@@ -1133,13 +1288,7 @@ export default async function DashboardPage() {
                   </div>
                 </div>
               ))}
-
-              {activityFeed30Days.length === 0 && (
-                <div className="p-6 text-center text-slate-400 text-xs">
-                  No recent transaction activity recorded yet.
-                </div>
-              )}
-            </div>
+            </DashboardExpandableSection>
           </div>
         </>
       )}

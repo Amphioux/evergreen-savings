@@ -145,7 +145,7 @@ export default function RegisterMemberForm({ nextAccountId }: { nextAccountId: s
     const formData = new FormData(e.currentTarget);
 
     if (phone && phone.length !== 10) {
-      setStatus({ error: 'Nepali phone number must be exactly 10 digits.' });
+      setStatus({ error: 'Phone number must be exactly 10 digits.' });
       return;
     }
 

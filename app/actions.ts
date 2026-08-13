@@ -3,6 +3,7 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { getCurrentUserRole } from '@/lib/getUserRole';
 import { formatMonthLabel } from '@/lib/formatters';
+import { getMonthsBetween, getSavingsRateForMonth } from '@/lib/savingsUtils';
 import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
 import { revalidatePath } from 'next/cache';
@@ -50,7 +51,7 @@ async function getSupabaseServerClient() {
   );
 }
 
-// Helper: Get active editor details for audit trail tracking (Updated with Session Fallback)
+// Helper: Get active editor details for audit trail tracking
 async function getActiveEditorDetails() {
   const { email } = await getCurrentUserRole();
   const supabaseServer = await getSupabaseServerClient();
@@ -93,7 +94,7 @@ async function getActiveEditorDetails() {
     }
   }
 
-  // Determine Audit Identifier (e.g. SA-002 - Sulav Chaudhary)
+  // Determine Audit Identifier
   const accountId = profile?.account_id || user.user_metadata?.account_id;
   let auditUser = 'System Admin';
   
@@ -109,6 +110,191 @@ async function getActiveEditorDetails() {
     editorDesignation, 
     auditUser 
   };
+}
+
+// =========================================================================
+// CONTRIBUTION RULES & SAVINGS RATE TIER ACTIONS
+// =========================================================================
+
+// Async Server Action Wrapper: Generate all YYYY-MM months between two dates inclusive
+export async function getMonthsBetweenAction(startYYYYMM: string, endYYYYMM: string): Promise<string[]> {
+  return getMonthsBetween(startYYYYMM, endYYYYMM);
+}
+
+// Async Server Action Wrapper: Get required monthly rate for a specific YYYY-MM month based on contribution_rules
+export async function getSavingsRateForMonthAction(targetYYYYMM: string, rules: any[] = []): Promise<number> {
+  return getSavingsRateForMonth(targetYYYYMM, rules);
+}
+
+// Action: Fetch all contribution rules
+export async function getContributionRules() {
+  const { data } = await supabaseAdmin
+    .from('contribution_rules')
+    .select('*')
+    .order('effective_from_month', { ascending: false });
+
+  return data || [];
+}
+
+// Action: Create or Schedule a New Savings Contribution Rule (Superadmin Only)
+export async function createContributionRule(formData: FormData) {
+  try {
+    const effective_from_month = (formData.get('effective_from_month') as string)?.trim(); // 'YYYY-MM'
+    const monthly_amount = Number(formData.get('monthly_amount'));
+    const notes = (formData.get('notes') as string)?.trim();
+
+    if (!effective_from_month || !monthly_amount || monthly_amount <= 0) {
+      return { error: 'Effective starting month and a valid positive amount are required.' };
+    }
+
+    if (!notes || notes.length < 5) {
+      return { error: 'A valid audit note / General Assembly resolution reason is required (min 5 characters).' };
+    }
+
+    const { isSuperAdmin } = await getCurrentUserRole();
+    if (!isSuperAdmin) {
+      return { error: 'Unauthorized: Only Superadmins can reconfigure cooperative contribution rules.' };
+    }
+
+    const { editorId, editorName, editorDesignation, auditUser } = await getActiveEditorDetails();
+
+    // Calculate previous month to close out current active rule
+    const [y, m] = effective_from_month.split('-').map(Number);
+    let prevY = y;
+    let prevM = m - 1;
+    if (prevM < 1) {
+      prevM = 12;
+      prevY--;
+    }
+    const prevMonthStr = `${prevY}-${prevM.toString().padStart(2, '0')}`;
+
+    // Close out currently active rule (where effective_to_month IS NULL)
+    await supabaseAdmin
+      .from('contribution_rules')
+      .update({ effective_to_month: prevMonthStr })
+      .is('effective_to_month', null);
+
+    // Insert new rule with full author metadata
+    const { data: newRule, error } = await supabaseAdmin
+      .from('contribution_rules')
+      .insert([{
+        effective_from_month,
+        effective_to_month: null,
+        monthly_amount,
+        notes,
+        recorded_by_id: editorId,
+        recorded_by_name: editorName,
+        recorded_by_designation: editorDesignation,
+        recorded_by_email: auditUser,
+      }])
+      .select()
+      .single();
+
+    if (error) return { error: error.message };
+
+    // Record audit log
+    await supabaseAdmin.from('audit_logs').insert([{
+      entity_type: 'CONTRIBUTION_RULE',
+      entity_id: String(newRule.id),
+      action: 'CONTRIBUTION_RULE_CREATED',
+      new_value: { 
+        effective_from_month, 
+        monthly_amount, 
+        notes, 
+        author: `${editorName} (${editorDesignation})` 
+      },
+      reason: `Savings rule created: NPR ${monthly_amount} starting ${effective_from_month}. Notes: ${notes}`,
+      changed_by_email: auditUser
+    }]);
+
+    revalidatePath('/dashboard');
+    revalidatePath('/deposits');
+    revalidatePath('/treasury');
+    revalidatePath('/');
+
+    return { success: `New contribution rule (NPR ${monthly_amount.toLocaleString('en-IN')} starting ${effective_from_month}) saved successfully!` };
+  } catch (err: any) {
+    return { error: err.message || 'Failed to create contribution rule.' };
+  }
+}
+
+// Action: Update an Existing Contribution Rule's Effective Dates, Amount, or Notes (Superadmin Only)
+export async function updateContributionRule(formData: FormData) {
+  try {
+    const rule_id = Number(formData.get('rule_id'));
+    const effective_from_month = (formData.get('effective_from_month') as string)?.trim(); // 'YYYY-MM'
+    const effective_to_month = (formData.get('effective_to_month') as string)?.trim() || null; // 'YYYY-MM' or null
+    const monthly_amount = Number(formData.get('monthly_amount'));
+    const notes = (formData.get('notes') as string)?.trim();
+
+    if (!rule_id || !effective_from_month || !monthly_amount || monthly_amount <= 0) {
+      return { error: 'Rule ID, effective starting month, and a valid positive amount are required.' };
+    }
+
+    if (!notes || notes.length < 5) {
+      return { error: 'A valid audit note / resolution reason is required (min 5 characters).' };
+    }
+
+    const { isSuperAdmin } = await getCurrentUserRole();
+    if (!isSuperAdmin) {
+      return { error: 'Unauthorized: Only Superadmins can update contribution rules.' };
+    }
+
+    const { editorName, editorDesignation, auditUser } = await getActiveEditorDetails();
+
+    const { data: oldRule } = await supabaseAdmin
+      .from('contribution_rules')
+      .select('*')
+      .eq('id', rule_id)
+      .single();
+
+    if (!oldRule) return { error: 'Contribution rule record not found.' };
+
+    const updateData: any = {
+      effective_from_month,
+      effective_to_month,
+      monthly_amount,
+      notes,
+    };
+
+    const { error } = await supabaseAdmin
+      .from('contribution_rules')
+      .update(updateData)
+      .eq('id', rule_id);
+
+    if (error) return { error: error.message };
+
+    // Record immutable audit log
+    await supabaseAdmin.from('audit_logs').insert([{
+      entity_type: 'CONTRIBUTION_RULE',
+      entity_id: String(rule_id),
+      action: 'CONTRIBUTION_RULE_EDITED',
+      old_value: {
+        effective_from_month: oldRule.effective_from_month,
+        effective_to_month: oldRule.effective_to_month,
+        monthly_amount: oldRule.monthly_amount,
+        notes: oldRule.notes,
+      },
+      new_value: { 
+        effective_from_month, 
+        effective_to_month, 
+        monthly_amount, 
+        notes, 
+        last_changed_by: `${editorName} (${editorDesignation})` 
+      },
+      reason: `Contribution rule #${rule_id} updated: NPR ${monthly_amount} (${effective_from_month} to ${effective_to_month || 'Present'}). Notes: ${notes}`,
+      changed_by_email: auditUser
+    }]);
+
+    revalidatePath('/dashboard');
+    revalidatePath('/deposits');
+    revalidatePath('/treasury');
+    revalidatePath('/');
+
+    return { success: `Contribution rule #${rule_id} updated successfully!` };
+  } catch (err: any) {
+    return { error: err.message || 'Failed to update contribution rule.' };
+  }
 }
 
 // Helper: Auto-generate sequential Deposit ID (Format: DPYYMM-XXX)
@@ -976,7 +1162,7 @@ export async function updateAdminPosition(formData: FormData) {
   }
 }
 
-// 8. Update Admin Profile Details (Preserves Creator + Captures Last Changed By Audit)
+// 8. Update Admin Profile Details
 export async function updateAdminProfileDetails(formData: FormData) {
   try {
     const { isSuperAdmin } = await getCurrentUserRole();
@@ -1372,12 +1558,17 @@ export async function settleAndDeactivateMember(formData: FormData) {
   return { success: `Account settled! Total Refund Paid: NPR ${netRefundPaid.toLocaleString('en-IN')}` };
 }
 
-// 13. Single Monthly Savings Deposit
+// 13. Single Monthly Savings Deposit Action
 export async function recordDeposit(formData: FormData) {
   const member_id = formData.get('member_id') as string;
   const for_month = formData.get('for_month') as string;
   const amount_paid = Number(formData.get('amount_paid')) || 500;
   const deposited_by_name = (formData.get('deposited_by_name') as string)?.trim() || null;
+  const deposit_note = (formData.get('deposit_note') as string)?.trim() || null;
+  const fine_amount = Number(formData.get('fine_amount')) || 0;
+  const fine_discount_amount = Number(formData.get('fine_discount_amount')) || 0;
+  const fine_waived = formData.get('fine_waived') === 'true';
+  const fine_override_reason = (formData.get('fine_override_reason') as string)?.trim() || null;
 
   if (!member_id || !for_month) return { error: 'Member and month required.' };
 
@@ -1401,18 +1592,25 @@ export async function recordDeposit(formData: FormData) {
 
   const deposit_code = await generateDepositCode(0);
 
+  const insertData: any = {
+    deposit_code,
+    member_id,
+    for_month: formattedMonth,
+    amount_paid,
+    deposited_by_name,
+    recorded_by_id: editorId,
+    recorded_by_name: editorName,
+    recorded_by_designation: editorDesignation,
+    deposit_note,
+    fine_amount,
+    fine_discount_amount,
+    fine_waived,
+    fine_override_reason
+  };
+
   const { data: newDep, error } = await supabaseAdmin
     .from('deposits')
-    .insert([{
-      deposit_code,
-      member_id,
-      for_month: formattedMonth,
-      amount_paid,
-      deposited_by_name,
-      recorded_by_id: editorId,
-      recorded_by_name: editorName,
-      recorded_by_designation: editorDesignation
-    }])
+    .insert([insertData])
     .select('*, profiles!member_id(full_name, account_id)')
     .single();
 
@@ -1428,6 +1626,11 @@ export async function recordDeposit(formData: FormData) {
       deposit_code,
       for_month,
       amount_paid,
+      fine_amount,
+      fine_discount_amount,
+      fine_waived,
+      fine_override_reason,
+      deposit_note,
       created_at: newDep.created_at,
       member_name: newDep.profiles?.full_name || 'Member',
       member_account_id: newDep.profiles?.account_id || 'N/A',
@@ -1441,7 +1644,7 @@ export async function recordDeposit(formData: FormData) {
 // 14. BULK MEETING DEPOSITS
 export async function recordBulkDeposits(payload: { 
   for_month: string; 
-  deposits: { member_id: string; amount_paid: number; deposited_by_name?: string | null }[] 
+  deposits: { member_id: string; amount_paid: number; deposited_by_name?: string | null; deposit_note?: string | null }[] 
 }) {
   const { for_month, deposits: depositList } = payload;
   if (!for_month || !depositList || depositList.length === 0) return { error: 'Target month required.' };
@@ -1485,6 +1688,7 @@ export async function recordBulkDeposits(payload: {
       for_month: monthFormatted,
       amount_paid: d.amount_paid || 500,
       deposited_by_name: d.deposited_by_name || null,
+      deposit_note: d.deposit_note || null,
       recorded_by_id: editorId,
       recorded_by_name: editorName,
       recorded_by_designation: editorDesignation
@@ -1494,6 +1698,7 @@ export async function recordBulkDeposits(payload: {
       deposit_code,
       for_month,
       amount_paid: d.amount_paid || 500,
+      deposit_note: d.deposit_note || null,
       member_name: member?.full_name || 'Member',
       member_account_id: member?.account_id || 'N/A',
       deposited_by_name: d.deposited_by_name || null,
@@ -1521,6 +1726,7 @@ export async function recordAdvanceDeposits(formData: FormData) {
   const num_months = Number(formData.get('num_months')) || 1;
   const monthly_amount = Number(formData.get('monthly_amount')) || 500;
   const deposited_by_name = (formData.get('deposited_by_name') as string)?.trim() || null;
+  const deposit_note = (formData.get('deposit_note') as string)?.trim() || null;
 
   if (!member_id || !start_month || num_months <= 0) return { error: 'Invalid parameters.' };
 
@@ -1550,6 +1756,7 @@ export async function recordAdvanceDeposits(formData: FormData) {
       for_month: m,
       amount_paid: monthly_amount,
       deposited_by_name,
+      deposit_note,
       recorded_by_id: editorId,
       recorded_by_name: editorName,
       recorded_by_designation: editorDesignation
@@ -1826,7 +2033,7 @@ export async function recordBankInterest(formData: FormData) {
   }
 }
 
-// 19b. UPDATE BANK INTEREST RECORD (Preserves Original Creator + Logs Edit)
+// 19b. UPDATE BANK INTEREST RECORD
 export async function updateBankInterest(formData: FormData) {
   try {
     const interest_id = Number(formData.get('interest_id'));
@@ -1877,7 +2084,6 @@ export async function recordAsset(formData: FormData) {
     const asset_type = (formData.get('asset_type') as string)?.toUpperCase() || 'LAND';
     const purchase_price = Number(formData.get('purchase_price')) || 0;
     
-    // Safely evaluate current_value: fallback to purchase_price if missing or 0
     const rawCurrentVal = formData.get('current_value');
     const current_value = rawCurrentVal && Number(rawCurrentVal) > 0 
       ? Number(rawCurrentVal) 
@@ -1934,7 +2140,7 @@ export async function recordAsset(formData: FormData) {
   }
 }
 
-// 20b. UPDATE PROPERTY ASSET DETAILS (Preserves Valuation, Edits Metadata)
+// 20b. UPDATE PROPERTY ASSET DETAILS
 export async function updateAsset(formData: FormData) {
   try {
     const asset_id = Number(formData.get('asset_id'));
@@ -2045,7 +2251,7 @@ export async function recordExpense(formData: FormData) {
   }
 }
 
-// 21b. UPDATE EXPENSE (Preserves Original Creator + Logs Last Changed By Audit)
+// 21b. UPDATE EXPENSE
 export async function updateExpense(formData: FormData) {
   try {
     const expense_id = Number(formData.get('expense_id'));
@@ -2121,7 +2327,7 @@ export async function updateExpense(formData: FormData) {
   }
 }
 
-// 22. UPDATE ASSET VALUATION (With Confirmation & Audit Trail)
+// 22. UPDATE ASSET VALUATION
 export async function updateAssetValuation(formData: FormData) {
   try {
     const assetId = Number(formData.get('asset_id'));
@@ -2169,12 +2375,18 @@ export async function updateAssetValuation(formData: FormData) {
   }
 }
 
-// 23. UPDATE DEPOSIT RECORD (Preserves Creator + Logs Last Changed By Audit)
+// 23. UPDATE DEPOSIT RECORD
 export async function updateDeposit(formData: FormData) {
   try {
     const deposit_id = formData.get('deposit_id') as string;
     const for_month = formData.get('for_month') as string;
     const amount_paid = Number(formData.get('amount_paid'));
+    const deposited_by_name = (formData.get('deposited_by_name') as string)?.trim() || null;
+    const deposit_note = (formData.get('deposit_note') as string)?.trim() || null;
+    const fine_amount = Number(formData.get('fine_amount')) || 0;
+    const fine_discount_amount = Number(formData.get('fine_discount_amount')) || 0;
+    const fine_waived = formData.get('fine_waived') === 'true';
+    const fine_override_reason = (formData.get('fine_override_reason') as string)?.trim() || null;
 
     if (!deposit_id || !for_month || !amount_paid) {
       return { error: 'Deposit ID, month, and amount are required.' };
@@ -2195,13 +2407,21 @@ export async function updateDeposit(formData: FormData) {
 
     if (!oldDeposit) return { error: 'Deposit record not found.' };
 
+    const updateFields: any = {
+      for_month: formattedMonth,
+      amount_paid,
+      deposited_by_name,
+      deposit_note,
+      fine_amount,
+      fine_discount_amount,
+      fine_waived,
+      fine_override_reason,
+      updated_at: new Date().toISOString(),
+    };
+
     const { error } = await supabaseAdmin
       .from('deposits')
-      .update({
-        for_month: formattedMonth,
-        amount_paid,
-        updated_at: new Date().toISOString(),
-      })
+      .update(updateFields)
       .eq('id', deposit_id);
 
     if (error) return { error: error.message };
@@ -2214,12 +2434,17 @@ export async function updateDeposit(formData: FormData) {
         deposit_code: oldDeposit.deposit_code,
         for_month: oldDeposit.for_month,
         amount_paid: oldDeposit.amount_paid,
+        fine_amount: oldDeposit.fine_amount,
         member_id: oldDeposit.member_id,
         original_recorded_by: `${oldDeposit.recorded_by_name || 'Admin'} (${oldDeposit.recorded_by_designation || 'Officer'})`,
       },
       new_value: { 
         for_month: formattedMonth, 
         amount_paid,
+        fine_amount,
+        fine_discount_amount,
+        fine_waived,
+        deposit_note,
         last_changed_by: `${editorName} (${editorDesignation})`
       },
       reason: `Savings deposit ledger entry corrected by ${editorName} (${editorDesignation})`,
@@ -2237,13 +2462,13 @@ export async function updateDeposit(formData: FormData) {
   }
 }
 
-// 24. Distribute Dividends (With Sequential Voucher Code, Recorder Badge, Audit Trail, Cutoff Filter & Strict Balancing)
+// 24. Distribute Dividends
 export async function distributeDividends(formData: FormData) {
   try {
     const title = formData.get('title') as string;
     const total_profit_pool = Number(formData.get('total_profit_pool'));
     const distributed_at = formData.get('distributed_at') as string;
-    const cutoff_month = formData.get('cutoff_month') as string; // 'YYYY-MM'
+    const cutoff_month = formData.get('cutoff_month') as string;
 
     if (!title || !total_profit_pool || total_profit_pool <= 0 || !cutoff_month) {
       return { error: 'Please provide title, profit pool amount, and cutoff month.' };
@@ -2254,7 +2479,6 @@ export async function distributeDividends(formData: FormData) {
 
     const { editorId, editorName, editorDesignation, auditUser } = await getActiveEditorDetails();
 
-    // 1. Fetch only ACTIVE INTERNAL MEMBERS
     const { data: profiles, error: profileErr } = await supabaseAdmin
       .from('profiles')
       .select('id, full_name, account_id, user_type, role, status')
@@ -2270,7 +2494,6 @@ export async function distributeDividends(formData: FormData) {
       return { error: 'No active internal group members found for dividend distribution.' };
     }
 
-    // 2. Fetch ALL deposits strictly UP TO the Cutoff Month
     const cutoffDateMax = `${cutoff_month}-31`;
 
     const { data: deposits, error: depErr } = await supabaseAdmin
@@ -2280,7 +2503,6 @@ export async function distributeDividends(formData: FormData) {
 
     if (depErr) throw depErr;
 
-    // A) Calculate TOTAL GROUP SAVINGS (Everyone's money in the whole system)
     const totalGroupSavings = (deposits || []).reduce((sum, d) => sum + Number(d.amount_paid || 0), 0);
 
     const savingsByMember: Record<string, number> = {};
@@ -2289,7 +2511,6 @@ export async function distributeDividends(formData: FormData) {
       savingsByMember[mId] = (savingsByMember[mId] || 0) + Number(d.amount_paid || 0);
     });
 
-    // B) Calculate TOTAL ELIGIBLE SAVINGS (Only the internal members getting dividends)
     let totalEligibleSavings = 0;
     const eligibleMembers = internalMembers.map((m) => {
       const savings = savingsByMember[m.id] || 0;
@@ -2301,10 +2522,8 @@ export async function distributeDividends(formData: FormData) {
       return { error: 'Total accumulated savings for internal members up to this cutoff month is zero.' };
     }
 
-    // Generate sequential code (e.g. DIV2608-001)
     const distCode = await generateDividendCode();
 
-    // 4. Build Individual Payout Entries & Verify Strict Ledger Balance
     let actualAllocatedTotal = 0;
     
     const payoutRecords = eligibleMembers.map((m) => {
@@ -2330,31 +2549,28 @@ export async function distributeDividends(formData: FormData) {
         deposit_note: note,
         payout_status: 'PAID',
         recorded_by_id: editorId,
-        recorded_by_name: editorName,             // e.g. "Sulav Chaudhary"
-        recorded_by_designation: editorDesignation // e.g. "Chairperson / President"
+        recorded_by_name: editorName,
+        recorded_by_designation: editorDesignation
       };
     });
 
-    // STRICT LEDGER MATCHING (Prevents execution if amounts don't exactly sum to the profit pool)
     const roundedAllocated = Math.round(actualAllocatedTotal * 100) / 100;
     const roundedPool = Math.round(total_profit_pool * 100) / 100;
     
-    // We allow a microscopic tolerance (0.05) just in case of JS floating math, but generally users should match exactly
     if (Math.abs(roundedAllocated - roundedPool) > 0.05) {
       return { 
         error: `Ledger Mismatch! The sum of all individual payouts (NPR ${roundedAllocated}) does not equal the declared Total Profit Pool (NPR ${roundedPool}). Please adjust individual amounts to balance exactly.` 
       };
     }
 
-    // 3. Insert Master Distribution Event (Now saving BOTH group and eligible totals accurately)
     const { data: distEvent, error: distErr } = await supabaseAdmin
       .from('dividend_distributions')
       .insert({
         distribution_code: distCode,
         title,
-        total_profit_pool: roundedPool, // Use rounded exact pool
-        total_group_savings: totalGroupSavings,       // Overall Cooperative Equity
-        total_eligible_savings: totalEligibleSavings, // Dividend Distribution Equity
+        total_profit_pool: roundedPool,
+        total_group_savings: totalGroupSavings,
+        total_eligible_savings: totalEligibleSavings,
         eligible_member_count: eligibleMembers.length,
         distributed_at,
         cutoff_month,
@@ -2367,7 +2583,6 @@ export async function distributeDividends(formData: FormData) {
 
     if (distErr) throw distErr;
 
-    // Map distribution_id to payouts now that we have it
     const finalPayouts = payoutRecords.map(p => ({ ...p, distribution_id: distEvent.id }));
 
     const { error: payoutErr } = await supabaseAdmin.from('dividend_payouts').insert(finalPayouts);
@@ -2401,7 +2616,7 @@ export async function distributeDividends(formData: FormData) {
   }
 }
 
-// 25. UPDATE LOAN (With Last Changed By Audit Tracking)
+// 25. UPDATE LOAN
 export async function updateLoan(formData: FormData) {
   try {
     const loan_id = Number(formData.get('loan_id'));
@@ -2485,7 +2700,7 @@ export async function updateLoan(formData: FormData) {
   }
 }
 
-// 26. UPDATE LOAN REPAYMENT (Preserves Creator + Logs Last Changed By Audit)
+// 26. UPDATE LOAN REPAYMENT
 export async function updateLoanPayment(formData: FormData) {
   try {
     const payment_id = Number(formData.get('payment_id'));
@@ -2698,7 +2913,6 @@ export async function deleteDividendDistribution(formData: FormData) {
     const { data: oldDist } = await supabaseAdmin.from('dividend_distributions').select('*').eq('id', id).single();
     if (!oldDist) return { error: 'Dividend distribution event not found.' };
 
-    // This will CASCADE DELETE all individual payouts attached to this distribution_id
     const { error } = await supabaseAdmin.from('dividend_distributions').delete().eq('id', id);
     if (error) return { error: error.message };
 
@@ -2717,3 +2931,278 @@ export async function deleteDividendDistribution(formData: FormData) {
     return { error: err.message || 'Failed to rollback dividend distribution.' };
   }
 }
+
+// 34. FINE CALCULATION RULES
+// Fetch fine configuration rules
+export async function getFineRules() {
+  const { data } = await supabaseAdmin
+    .from('fine_rules')
+    .select('*')
+    .order('created_at', { ascending: false });
+
+  return data || [];
+}
+
+// Create or update a fine rule (Superadmin / Admin)
+export async function createOrUpdateFineRule(formData: FormData) {
+  try {
+    const rule_id = formData.get('rule_id') ? Number(formData.get('rule_id')) : null;
+    const rule_type = (formData.get('rule_type') as string)?.trim(); // 'SAVINGS' | 'LOAN'
+    const fine_type = (formData.get('fine_type') as string)?.trim(); // 'PERCENTAGE' | 'FLAT_MONTHLY' | 'FLAT_DAILY'
+    const rate_value = Number(formData.get('rate_value'));
+    const grace_period_days = Number(formData.get('grace_period_days')) || 0;
+    const effective_from_month = (formData.get('effective_from_month') as string)?.trim();
+    const notes = (formData.get('notes') as string)?.trim();
+
+    if (!rule_type || !fine_type || rate_value === undefined || isNaN(rate_value) || rate_value < 0 || !effective_from_month) {
+      return { error: 'Rule type, fine type, positive rate value, and starting month are required.' };
+    }
+
+    if (!notes || notes.length < 5) {
+      return { error: 'Please provide an audit note / Assembly resolution reason (min 5 characters).' };
+    }
+
+    const { isAdmin } = await getCurrentUserRole();
+    if (!isAdmin) return { error: 'Unauthorized: Admins only.' };
+
+    const { editorId, editorName, editorDesignation, auditUser } = await getActiveEditorDetails();
+
+    if (rule_id) {
+      // Update existing rule
+      const { error } = await supabaseAdmin
+        .from('fine_rules')
+        .update({
+          rule_type,
+          fine_type,
+          rate_value,
+          grace_period_days,
+          effective_from_month,
+          notes,
+        })
+        .eq('id', rule_id);
+
+      if (error) return { error: error.message };
+    } else {
+      // Close active rules of same type
+      const [y, m] = effective_from_month.split('-').map(Number);
+      let prevY = y;
+      let prevM = m - 1;
+      if (prevM < 1) { prevM = 12; prevY--; }
+      const prevMonthStr = `${prevY}-${prevM.toString().padStart(2, '0')}`;
+
+      await supabaseAdmin
+        .from('fine_rules')
+        .update({ effective_to_month: prevMonthStr })
+        .eq('rule_type', rule_type)
+        .is('effective_to_month', null);
+
+      const { error } = await supabaseAdmin
+        .from('fine_rules')
+        .insert([{
+          rule_type,
+          fine_type,
+          rate_value,
+          grace_period_days,
+          effective_from_month,
+          effective_to_month: null,
+          notes,
+          recorded_by_id: editorId,
+          recorded_by_name: editorName,
+          recorded_by_designation: editorDesignation,
+          recorded_by_email: auditUser,
+        }]);
+
+      if (error) return { error: error.message };
+    }
+
+    await supabaseAdmin.from('audit_logs').insert([{
+      entity_type: 'FINE_RULE',
+      entity_id: String(rule_id || 'NEW'),
+      action: rule_id ? 'FINE_RULE_UPDATED' : 'FINE_RULE_CREATED',
+      new_value: { rule_type, fine_type, rate_value, grace_period_days, effective_from_month, notes },
+      reason: `Fine rule configured: ${rule_type} fine set to ${rate_value} (${fine_type}). Notes: ${notes}`,
+      changed_by_email: auditUser,
+    }]);
+
+    revalidatePath('/dashboard');
+    revalidatePath('/deposits');
+    revalidatePath('/loans');
+    revalidatePath('/');
+
+    const actionText = rule_id ? 'updated' : 'created';
+    return { success: `${rule_type} Fine rule ${actionText} successfully!` };
+  } catch (err: any) {
+    return { error: err.message || 'Failed to configure fine rule.' };
+  }
+}
+
+// 35. DELETE SAVINGS DEPOSIT VOUCHER (Superadmin / Admin Only)
+export async function deleteDeposit(formData: FormData) {
+  try {
+    const deposit_id = formData.get('deposit_id') as string;
+    const reason = (formData.get('reason') as string)?.trim() || 'Accidental deposit voucher removed by Admin';
+
+    if (!deposit_id) return { error: 'Deposit ID is required.' };
+
+    const { isAdmin } = await getCurrentUserRole();
+    if (!isAdmin) return { error: 'Unauthorized: Only Committee Admins can delete deposit slips.' };
+
+    const { editorName, editorDesignation, auditUser } = await getActiveEditorDetails();
+
+    const { data: oldDeposit } = await supabaseAdmin
+      .from('deposits')
+      .select('*')
+      .eq('id', deposit_id)
+      .single();
+
+    if (!oldDeposit) return { error: 'Deposit record not found.' };
+
+    const { error } = await supabaseAdmin
+      .from('deposits')
+      .delete()
+      .eq('id', deposit_id);
+
+    if (error) return { error: error.message };
+
+    // Record immutable audit log
+    await supabaseAdmin.from('audit_logs').insert([{
+      entity_type: 'SAVINGS_DEPOSIT',
+      entity_id: String(deposit_id),
+      action: 'DEPOSIT_RECORD_DELETED',
+      old_value: {
+        deposit_code: oldDeposit.deposit_code,
+        for_month: oldDeposit.for_month,
+        amount_paid: oldDeposit.amount_paid,
+        fine_amount: oldDeposit.fine_amount,
+        member_id: oldDeposit.member_id,
+        deposited_by_name: oldDeposit.deposited_by_name,
+        original_recorded_by: `${oldDeposit.recorded_by_name || 'Admin'} (${oldDeposit.recorded_by_designation || 'Officer'})`,
+      },
+      reason: `Deposit voucher (${oldDeposit.deposit_code || deposit_id}) deleted by ${editorName} (${editorDesignation}): ${reason}`,
+      changed_by_email: auditUser,
+    }]);
+
+    revalidatePath('/deposits');
+    revalidatePath('/members');
+    revalidatePath('/admin/user-lookup');
+    revalidatePath('/');
+
+    return { success: `Deposit voucher (${oldDeposit.deposit_code || deposit_id}) deleted permanently and audited!` };
+  } catch (err: any) {
+    return { error: err.message || 'Failed to delete deposit record.' };
+  }
+}
+
+
+// 36. DELETE CONTRIBUTION RULE (Superadmin Only)
+export async function deleteContributionRule(formData: FormData) {
+  try {
+    const rule_id = Number(formData.get('rule_id'));
+    const reason = (formData.get('reason') as string)?.trim() || 'Accidental rule entry deleted by Superadmin';
+
+    if (!rule_id) return { error: 'Rule ID is required.' };
+
+    const { isSuperAdmin } = await getCurrentUserRole();
+    if (!isSuperAdmin) return { error: 'Unauthorized: Only Superadmins can delete contribution rules.' };
+
+    const { editorName, editorDesignation, auditUser } = await getActiveEditorDetails();
+
+    const { data: oldRule } = await supabaseAdmin
+      .from('contribution_rules')
+      .select('*')
+      .eq('id', rule_id)
+      .single();
+
+    if (!oldRule) return { error: 'Contribution rule record not found.' };
+
+    const { error } = await supabaseAdmin
+      .from('contribution_rules')
+      .delete()
+      .eq('id', rule_id);
+
+    if (error) return { error: error.message };
+
+    // Record immutable audit log
+    await supabaseAdmin.from('audit_logs').insert([{
+      entity_type: 'CONTRIBUTION_RULE',
+      entity_id: String(rule_id),
+      action: 'CONTRIBUTION_RULE_DELETED',
+      old_value: {
+        effective_from_month: oldRule.effective_from_month,
+        effective_to_month: oldRule.effective_to_month,
+        monthly_amount: oldRule.monthly_amount,
+        notes: oldRule.notes,
+        original_author: `${oldRule.recorded_by_name || 'Admin'} (${oldRule.recorded_by_designation || 'Officer'})`,
+      },
+      reason: `Contribution rule #${rule_id} deleted by ${editorName} (${editorDesignation}): ${reason}`,
+      changed_by_email: auditUser,
+    }]);
+
+    revalidatePath('/dashboard');
+    revalidatePath('/deposits');
+    revalidatePath('/treasury');
+    revalidatePath('/');
+
+    return { success: `Contribution rule #${rule_id} deleted permanently and audited!` };
+  } catch (err: any) {
+    return { error: err.message || 'Failed to delete contribution rule.' };
+  }
+}
+
+// 37. DELETE FINE RULE (Admin / Superadmin)
+export async function deleteFineRule(formData: FormData) {
+  try {
+    const rule_id = Number(formData.get('rule_id'));
+    const reason = (formData.get('reason') as string)?.trim() || 'Accidental fine rule deleted by Admin';
+
+    if (!rule_id) return { error: 'Rule ID is required.' };
+
+    const { isAdmin } = await getCurrentUserRole();
+    if (!isAdmin) return { error: 'Unauthorized: Only Committee Admins can delete fine rules.' };
+
+    const { editorName, editorDesignation, auditUser } = await getActiveEditorDetails();
+
+    const { data: oldRule } = await supabaseAdmin
+      .from('fine_rules')
+      .select('*')
+      .eq('id', rule_id)
+      .single();
+
+    if (!oldRule) return { error: 'Fine rule record not found.' };
+
+    const { error } = await supabaseAdmin
+      .from('fine_rules')
+      .delete()
+      .eq('id', rule_id);
+
+    if (error) return { error: error.message };
+
+    // Record immutable audit log
+    await supabaseAdmin.from('audit_logs').insert([{
+      entity_type: 'FINE_RULE',
+      entity_id: String(rule_id),
+      action: 'FINE_RULE_DELETED',
+      old_value: {
+        rule_type: oldRule.rule_type,
+        fine_type: oldRule.fine_type,
+        rate_value: oldRule.rate_value,
+        grace_period_days: oldRule.grace_period_days,
+        effective_from_month: oldRule.effective_from_month,
+        notes: oldRule.notes,
+        original_author: `${oldRule.recorded_by_name || 'Admin'} (${oldRule.recorded_by_designation || 'Officer'})`,
+      },
+      reason: `Fine rule #${rule_id} (${oldRule.rule_type}) deleted by ${editorName} (${editorDesignation}): ${reason}`,
+      changed_by_email: auditUser,
+    }]);
+
+    revalidatePath('/dashboard');
+    revalidatePath('/deposits');
+    revalidatePath('/loans');
+    revalidatePath('/');
+
+    return { success: `${oldRule.rule_type} fine rule #${rule_id} deleted permanently and audited!` };
+  } catch (err: any) {
+    return { error: err.message || 'Failed to delete fine rule.' };
+  }
+}
+

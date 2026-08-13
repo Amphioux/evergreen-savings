@@ -1,9 +1,11 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { recordDeposit, recordBulkDeposits, recordAdvanceDeposits } from '@/app/actions';
 import DepositReceiptModal from './DepositReceiptModal';
 import { formatMonthLabel } from '@/lib/formatters';
+import { getSavingsRateForMonth } from '@/lib/savingsUtils';
 import { 
   PiggyBank, 
   Users, 
@@ -17,13 +19,16 @@ import {
   Printer,
   ShieldCheck,
   CheckCircle2,
-  History
+  History,
+  FileText
 } from 'lucide-react';
 
 interface DepositsClientContainerProps {
   activeMembers: any[];
   allProfiles?: any[];
   deposits?: any[];
+  fineRules?: any[];
+  contributionRules?: any[];
 }
 
 function getNextEligibleMonth(memberId: string, deposits: any[] = []): string {
@@ -54,8 +59,13 @@ function getNextEligibleMonth(memberId: string, deposits: any[] = []): string {
 
 export default function DepositsClientContainer({ 
   activeMembers = [], 
-  deposits = [] 
+  deposits = [],
+  contributionRules = []
 }: DepositsClientContainerProps) {
+  const searchParams = useSearchParams();
+  const queryMemberId = searchParams.get('member_id');
+  const queryForMonth = searchParams.get('for_month');
+
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<'SINGLE' | 'BULK' | 'ADVANCE'>('SINGLE');
 
@@ -65,6 +75,7 @@ export default function DepositsClientContainer({
   const [singleIsSelf, setSingleIsSelf] = useState(true);
   const [singleDepositorName, setSingleDepositorName] = useState('');
   const [singleAmount, setSingleAmount] = useState('500');
+  const [singleDepositNote, setSingleDepositNote] = useState('');
 
   // Advance Form State
   const [advanceMemberId, setAdvanceMemberId] = useState('');
@@ -73,11 +84,12 @@ export default function DepositsClientContainer({
   const [advanceDepositorName, setAdvanceDepositorName] = useState('');
   const [advanceNumMonths, setAdvanceNumMonths] = useState('3');
   const [advanceMonthlyAmount, setAdvanceMonthlyAmount] = useState('500');
+  const [advanceDepositNote, setAdvanceDepositNote] = useState('');
 
   // Bulk Form State
   const [bulkTargetMonth, setBulkTargetMonth] = useState(new Date().toISOString().slice(0, 7));
   const [bulkAllSelf, setBulkAllSelf] = useState(true);
-  const [selectedMembers, setSelectedMembers] = useState<Record<string, { selected: boolean; amount: number; depositorName: string }>>({});
+  const [selectedMembers, setSelectedMembers] = useState<Record<string, { selected: boolean; amount: number; depositorName: string; note: string }>>({});
 
   // Batch History State
   const [selectedHistoryKey, setSelectedHistoryKey] = useState<string>('');
@@ -102,6 +114,26 @@ export default function DepositsClientContainer({
   const memberMap = useMemo(() => {
     return new Map(safeMembers.map((m) => [String(m.id), m]));
   }, [safeMembers]);
+
+  // Handle URL Query Params
+  useEffect(() => {
+    if (queryMemberId) {
+      setSingleMemberId(queryMemberId);
+      const targetMonth = queryForMonth || getNextEligibleMonth(queryMemberId, safeDeposits);
+      setSingleForMonth(targetMonth);
+      setIsModalOpen(true);
+      setActiveTab('SINGLE');
+    }
+  }, [queryMemberId, queryForMonth, safeDeposits]);
+
+  // Dynamic Base Rate Effect
+  useEffect(() => {
+    if (!singleForMonth || !singleMemberId) return;
+
+    // Auto-Populate Base Savings Rate for Selected Month
+    const baseAmount = getSavingsRateForMonth(singleForMonth, contributionRules);
+    setSingleAmount(String(baseAmount));
+  }, [singleMemberId, singleForMonth, contributionRules]);
 
   // Group historical deposits by contribution month
   const batchHistoryOptions = useMemo(() => {
@@ -132,7 +164,8 @@ export default function DepositsClientContainer({
   function handleSingleMemberChange(memberId: string) {
     setSingleMemberId(memberId);
     if (memberId) {
-      setSingleForMonth(getNextEligibleMonth(memberId, safeDeposits));
+      const nextMonth = getNextEligibleMonth(memberId, safeDeposits);
+      setSingleForMonth(nextMonth);
     }
   }
 
@@ -144,12 +177,13 @@ export default function DepositsClientContainer({
   }
 
   function toggleSelectAll(checked: boolean) {
-    const nextState: Record<string, { selected: boolean; amount: number; depositorName: string }> = {};
+    const nextState: Record<string, { selected: boolean; amount: number; depositorName: string; note: string }> = {};
     safeMembers.forEach((m) => {
       nextState[m.id] = { 
         selected: checked, 
         amount: selectedMembers[m.id]?.amount || 500,
-        depositorName: selectedMembers[m.id]?.depositorName || '' 
+        depositorName: selectedMembers[m.id]?.depositorName || '',
+        note: selectedMembers[m.id]?.note || ''
       };
     });
     setSelectedMembers(nextState);
@@ -161,7 +195,8 @@ export default function DepositsClientContainer({
       [memberId]: { 
         selected: checked, 
         amount: prev[memberId]?.amount || 500,
-        depositorName: prev[memberId]?.depositorName || ''
+        depositorName: prev[memberId]?.depositorName || '',
+        note: prev[memberId]?.note || ''
       },
     }));
   }
@@ -172,7 +207,8 @@ export default function DepositsClientContainer({
       [memberId]: { 
         selected: prev[memberId]?.selected || true, 
         amount,
-        depositorName: prev[memberId]?.depositorName || ''
+        depositorName: prev[memberId]?.depositorName || '',
+        note: prev[memberId]?.note || ''
       },
     }));
   }
@@ -183,7 +219,20 @@ export default function DepositsClientContainer({
       [memberId]: { 
         selected: prev[memberId]?.selected || true, 
         amount: prev[memberId]?.amount || 500,
-        depositorName
+        depositorName,
+        note: prev[memberId]?.note || ''
+      },
+    }));
+  }
+
+  function handleBulkNoteChange(memberId: string, note: string) {
+    setSelectedMembers((prev) => ({
+      ...prev,
+      [memberId]: { 
+        selected: prev[memberId]?.selected || true, 
+        amount: prev[memberId]?.amount || 500,
+        depositorName: prev[memberId]?.depositorName || '',
+        note
       },
     }));
   }
@@ -200,17 +249,19 @@ export default function DepositsClientContainer({
     }
 
     const formData = new FormData(e.currentTarget);
+    formData.append('deposit_note', singleDepositNote);
 
     setConfirmationData({
       type: 'SINGLE',
       summaryItems: [
         { label: 'Member Name', value: `${member.full_name} (${member.account_id || 'N/A'})` },
         { label: 'Contribution Month', value: formatMonthLabel(singleForMonth) },
-        { label: 'Amount Paid', value: `NPR ${Number(singleAmount).toLocaleString('en-IN')}` },
+        { label: 'Deposit Base Amount', value: `NPR ${Number(singleAmount).toLocaleString('en-IN')}` },
         { 
           label: 'Deposited By', 
           value: singleIsSelf ? 'Self (Member In Person)' : `${singleDepositorName} (Representative)` 
         },
+        { label: 'Deposit Reference Note', value: singleDepositNote || 'N/A' },
       ],
       payload: formData,
     });
@@ -230,7 +281,8 @@ export default function DepositsClientContainer({
     const depositsToSubmit = selectedList.map(([member_id, data]) => ({ 
       member_id, 
       amount_paid: data.amount,
-      deposited_by_name: bulkAllSelf ? null : (data.depositorName?.trim() || null)
+      deposited_by_name: bulkAllSelf ? null : (data.depositorName?.trim() || null),
+      deposit_note: data.note?.trim() || null
     }));
 
     setConfirmationData({
@@ -257,6 +309,7 @@ export default function DepositsClientContainer({
 
     const totalAmt = Number(advanceNumMonths) * Number(advanceMonthlyAmount);
     const formData = new FormData(e.currentTarget);
+    formData.append('deposit_note', advanceDepositNote);
 
     setConfirmationData({
       type: 'ADVANCE',
@@ -270,6 +323,7 @@ export default function DepositsClientContainer({
           label: 'Deposited By', 
           value: advanceIsSelf ? 'Self (Member In Person)' : `${advanceDepositorName} (Representative)` 
         },
+        { label: 'Deposit Reference Note', value: advanceDepositNote || 'N/A' },
       ],
       payload: formData,
     });
@@ -299,7 +353,7 @@ export default function DepositsClientContainer({
         setConfirmationData(null);
         setIsModalOpen(false);
         setSingleDepositorName('');
-        setSingleIsSelf(true);
+        setSingleDepositNote('');
       }
     } else if (confirmationData.type === 'BULK') {
       const res = await recordBulkDeposits(confirmationData.payload);
@@ -328,13 +382,13 @@ export default function DepositsClientContainer({
         setConfirmationData(null);
         setIsModalOpen(false);
         setAdvanceDepositorName('');
-        setAdvanceIsSelf(true);
+        setAdvanceDepositNote('');
       }
     }
   }
 
   return (
-    <div className="space-y-4 text-left">
+    <div className="space-y-4 text-left font-sans">
       
       {/* Action Controls Bar */}
       <div className="flex flex-wrap items-center justify-between gap-3 bg-white p-4 rounded-2xl border border-slate-200 shadow-xs print:hidden">
@@ -349,7 +403,7 @@ export default function DepositsClientContainer({
               setSingleForMonth(getNextEligibleMonth(defaultMember, safeDeposits));
             }
           }}
-          className="px-4 py-2.5 bg-emerald-900 hover:bg-emerald-800 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 shadow-xs transition-colors"
+          className="px-4 py-2.5 bg-emerald-900 hover:bg-emerald-800 text-white font-bold text-xs rounded-xl inline-flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer"
         >
           <Plus size={16} /> Record Deposit (Popup Form)
         </button>
@@ -389,7 +443,7 @@ export default function DepositsClientContainer({
           {activeBatchMonth && (
             <button
               onClick={() => handleOpenBatchPrint(activeBatchMonth)}
-              className="px-3.5 py-1.5 bg-blue-900 hover:bg-blue-800 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 transition-colors shadow-xs"
+              className="px-3.5 py-1.5 bg-blue-900 hover:bg-blue-800 text-white font-bold text-xs rounded-xl inline-flex items-center gap-1.5 transition-colors shadow-xs cursor-pointer"
             >
               <Printer size={14} /> Print New Batch Vouchers
             </button>
@@ -413,7 +467,7 @@ export default function DepositsClientContainer({
           {activeBatchMonth && (
             <button
               onClick={() => handleOpenBatchPrint(activeBatchMonth)}
-              className="px-3 py-1 bg-blue-900 hover:bg-blue-800 text-white font-bold text-xs rounded-lg flex items-center gap-1 transition-colors"
+              className="px-3 py-1 bg-blue-900 hover:bg-blue-800 text-white font-bold text-xs rounded-lg inline-flex items-center gap-1 transition-colors cursor-pointer"
             >
               <Printer size={13} /> Open Batch Print Window
             </button>
@@ -435,7 +489,7 @@ export default function DepositsClientContainer({
                   setIsModalOpen(false);
                   setConfirmationData(null);
                 }} 
-                className="p-1 text-slate-400 hover:text-slate-700"
+                className="p-1 text-slate-400 hover:text-slate-700 cursor-pointer"
               >
                 <X size={18} />
               </button>
@@ -461,7 +515,7 @@ export default function DepositsClientContainer({
 
                 <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 divide-y divide-slate-200">
                   {confirmationData.summaryItems.map((item, idx) => (
-                    <div key={idx} className="py-2.5 flex justify-between items-center gap-4 text-xs">
+                    <div key={idx} className="py-2 flex justify-between items-center gap-4 text-xs">
                       <span className="text-slate-500 font-medium">{item.label}:</span>
                       <strong className="text-slate-900 font-bold text-right">{item.value}</strong>
                     </div>
@@ -473,7 +527,7 @@ export default function DepositsClientContainer({
                     type="button"
                     disabled={loading}
                     onClick={() => setConfirmationData(null)}
-                    className="w-1/2 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl transition-colors"
+                    className="w-1/2 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl transition-colors cursor-pointer"
                   >
                     Edit Details
                   </button>
@@ -482,7 +536,7 @@ export default function DepositsClientContainer({
                     type="button"
                     disabled={loading}
                     onClick={executeConfirmedSubmit}
-                    className="w-1/2 py-2.5 bg-emerald-900 hover:bg-emerald-800 text-white font-bold rounded-xl flex items-center justify-center gap-1.5 transition-colors shadow-xs"
+                    className="w-1/2 py-2.5 bg-emerald-900 hover:bg-emerald-800 text-white font-bold rounded-xl inline-flex justify-center items-center gap-1.5 transition-colors shadow-xs cursor-pointer"
                   >
                     {loading ? 'Processing Transaction...' : 'Confirm & Generate Slips'}
                   </button>
@@ -494,7 +548,7 @@ export default function DepositsClientContainer({
                   <button
                     type="button"
                     onClick={() => { setActiveTab('SINGLE'); setStatus(null); }}
-                    className={`px-3 py-1.5 text-xs font-bold rounded-lg flex items-center gap-1 transition-colors ${
+                    className={`px-3 py-1.5 text-xs font-bold rounded-lg inline-flex items-center gap-1 cursor-pointer transition-colors ${
                       activeTab === 'SINGLE' ? 'bg-emerald-900 text-white' : 'bg-slate-100 text-slate-700'
                     }`}
                   >
@@ -503,7 +557,7 @@ export default function DepositsClientContainer({
                   <button
                     type="button"
                     onClick={() => { setActiveTab('BULK'); setStatus(null); }}
-                    className={`px-3 py-1.5 text-xs font-bold rounded-lg flex items-center gap-1 transition-colors ${
+                    className={`px-3 py-1.5 text-xs font-bold rounded-lg inline-flex items-center gap-1 cursor-pointer transition-colors ${
                       activeTab === 'BULK' ? 'bg-blue-900 text-white' : 'bg-slate-100 text-slate-700'
                     }`}
                   >
@@ -512,7 +566,7 @@ export default function DepositsClientContainer({
                   <button
                     type="button"
                     onClick={() => { setActiveTab('ADVANCE'); setStatus(null); }}
-                    className={`px-3 py-1.5 text-xs font-bold rounded-lg flex items-center gap-1 transition-colors ${
+                    className={`px-3 py-1.5 text-xs font-bold rounded-lg inline-flex items-center gap-1 cursor-pointer transition-colors ${
                       activeTab === 'ADVANCE' ? 'bg-purple-900 text-white' : 'bg-slate-100 text-slate-700'
                     }`}
                   >
@@ -540,9 +594,38 @@ export default function DepositsClientContainer({
                       </select>
                     </div>
 
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block font-bold text-slate-700 mb-1">
+                          Contribution Month *
+                        </label>
+                        <input
+                          type="month"
+                          name="for_month"
+                          value={singleForMonth}
+                          onChange={(e) => setSingleForMonth(e.target.value)}
+                          required
+                          className="w-full p-2 border rounded-lg font-mono font-bold text-slate-900 bg-emerald-50/50"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block font-bold text-slate-700 mb-1">Amount Paid (NPR) *</label>
+                        <input
+                          type="number"
+                          name="amount_paid"
+                          value={singleAmount}
+                          onChange={(e) => setSingleAmount(e.target.value)}
+                          required
+                          className="w-full p-2 border rounded-lg font-mono font-bold text-slate-900"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Depositor Identity Box */}
                     <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
                       <label className="block font-bold text-slate-800">Depositor Identity *</label>
-                      <div className="flex items-center gap-4 text-xs">
+                      <div className="flex items-center gap-4">
                         <label className="flex items-center gap-1.5 cursor-pointer font-semibold text-slate-700">
                           <input
                             type="radio"
@@ -587,34 +670,21 @@ export default function DepositsClientContainer({
                     </div>
 
                     <div>
-                      <label className="block font-bold text-slate-700 mb-1">
-                        Contribution Month * <span className="text-[10px] text-emerald-700 font-bold">(Auto-calculated Next Month)</span>
+                      <label className="block font-bold text-slate-700 mb-1 flex items-center gap-1">
+                        <FileText size={12} /> Deposit Reference Note (Optional)
                       </label>
                       <input
-                        type="month"
-                        name="for_month"
-                        value={singleForMonth}
-                        onChange={(e) => setSingleForMonth(e.target.value)}
-                        required
-                        className="w-full p-2 border rounded-lg font-mono font-bold text-slate-900 bg-emerald-50/50"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block font-bold text-slate-700 mb-1">Amount Paid (NPR) *</label>
-                      <input
-                        type="number"
-                        name="amount_paid"
-                        value={singleAmount}
-                        onChange={(e) => setSingleAmount(e.target.value)}
-                        required
-                        className="w-full p-2 border rounded-lg font-mono font-bold text-slate-900"
+                        type="text"
+                        placeholder="e.g. Paid via bank transfer or cash in monthly meeting"
+                        value={singleDepositNote}
+                        onChange={(e) => setSingleDepositNote(e.target.value)}
+                        className="w-full p-2 border border-slate-300 rounded-lg text-slate-900"
                       />
                     </div>
 
                     <button
                       type="submit"
-                      className="w-full py-2.5 bg-emerald-900 hover:bg-emerald-800 text-white font-bold text-xs rounded-xl transition-colors flex items-center justify-center gap-1.5"
+                      className="w-full py-2.5 bg-emerald-900 hover:bg-emerald-800 text-white font-bold text-xs rounded-xl inline-flex justify-center items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
                     >
                       <ShieldCheck size={15} /> Review & Confirm Single Deposit
                     </button>
@@ -636,7 +706,7 @@ export default function DepositsClientContainer({
                       <button
                         type="button"
                         onClick={() => toggleSelectAll(true)}
-                        className="text-blue-700 font-bold hover:underline flex items-center gap-1"
+                        className="text-blue-700 font-bold hover:underline flex items-center gap-1 cursor-pointer"
                       >
                         <CheckSquare size={13} /> Select All
                       </button>
@@ -685,14 +755,25 @@ export default function DepositsClientContainer({
                             />
                           </div>
 
-                          {!bulkAllSelf && selectedMembers[m.id]?.selected && (
-                            <input
-                              type="text"
-                              placeholder="Representative Name (Leave blank if Self)"
-                              value={selectedMembers[m.id]?.depositorName || ''}
-                              onChange={(e) => handleDepositorNameChange(m.id, e.target.value)}
-                              className="w-full p-1 pl-2 text-[11px] border border-slate-300 rounded bg-white font-medium text-slate-800"
-                            />
+                          {selectedMembers[m.id]?.selected && (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-0.5">
+                              {!bulkAllSelf && (
+                                <input
+                                  type="text"
+                                  placeholder="Representative Name"
+                                  value={selectedMembers[m.id]?.depositorName || ''}
+                                  onChange={(e) => handleDepositorNameChange(m.id, e.target.value)}
+                                  className="w-full p-1 pl-2 text-[11px] border border-slate-300 rounded bg-white font-medium text-slate-800"
+                                />
+                              )}
+                              <input
+                                type="text"
+                                placeholder="Deposit Note (Optional)"
+                                value={selectedMembers[m.id]?.note || ''}
+                                onChange={(e) => handleBulkNoteChange(m.id, e.target.value)}
+                                className="w-full p-1 pl-2 text-[11px] border border-slate-300 rounded bg-white text-slate-800"
+                              />
+                            </div>
                           )}
                         </div>
                       ))}
@@ -701,7 +782,7 @@ export default function DepositsClientContainer({
                     <button
                       type="button"
                       onClick={prepareBulkConfirmation}
-                      className="w-full py-2.5 bg-blue-900 hover:bg-blue-800 text-white font-bold text-xs rounded-xl transition-colors flex items-center justify-center gap-1.5"
+                      className="w-full py-2.5 bg-blue-900 hover:bg-blue-800 text-white font-bold text-xs rounded-xl transition-colors inline-flex justify-center items-center gap-1.5 cursor-pointer shadow-xs"
                     >
                       <ShieldCheck size={15} /> Review & Confirm Group Deposits
                     </button>
@@ -772,33 +853,35 @@ export default function DepositsClientContainer({
                       )}
                     </div>
 
-                    <div>
-                      <label className="block font-bold text-slate-700 mb-1">
-                        Start Month * <span className="text-[10px] text-purple-700 font-bold">(Auto-calculated Next Month)</span>
-                      </label>
-                      <input
-                        type="month"
-                        name="start_month"
-                        value={advanceStartMonth}
-                        onChange={(e) => setAdvanceStartMonth(e.target.value)}
-                        required
-                        className="w-full p-2 border rounded-lg font-mono font-bold text-slate-900 bg-purple-50/50"
-                      />
-                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block font-bold text-slate-700 mb-1">
+                          Start Month *
+                        </label>
+                        <input
+                          type="month"
+                          name="start_month"
+                          value={advanceStartMonth}
+                          onChange={(e) => setAdvanceStartMonth(e.target.value)}
+                          required
+                          className="w-full p-2 border rounded-lg font-mono font-bold text-slate-900 bg-purple-50/50"
+                        />
+                      </div>
 
-                    <div>
-                      <label className="block font-bold text-slate-700 mb-1">Number of Advance Months *</label>
-                      <select 
-                        name="num_months" 
-                        value={advanceNumMonths}
-                        onChange={(e) => setAdvanceNumMonths(e.target.value)}
-                        className="w-full p-2 border rounded-lg font-bold text-slate-900"
-                      >
-                        <option value={2}>2 Months Advance</option>
-                        <option value={3}>3 Months Advance (Quarterly)</option>
-                        <option value={6}>6 Months Advance (Half-Yearly)</option>
-                        <option value={12}>12 Months Advance (Annual)</option>
-                      </select>
+                      <div>
+                        <label className="block font-bold text-slate-700 mb-1">Number of Advance Months *</label>
+                        <select 
+                          name="num_months" 
+                          value={advanceNumMonths}
+                          onChange={(e) => setAdvanceNumMonths(e.target.value)}
+                          className="w-full p-2 border rounded-lg font-bold text-slate-900 bg-white"
+                        >
+                          <option value={2}>2 Months Advance</option>
+                          <option value={3}>3 Months Advance (Quarterly)</option>
+                          <option value={6}>6 Months Advance (Half-Yearly)</option>
+                          <option value={12}>12 Months Advance (Annual)</option>
+                        </select>
+                      </div>
                     </div>
 
                     <div>
@@ -813,9 +896,20 @@ export default function DepositsClientContainer({
                       />
                     </div>
 
+                    <div>
+                      <label className="block font-bold text-slate-700 mb-1">Deposit Note (Optional)</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. Annual lump sum deposit"
+                        value={advanceDepositNote}
+                        onChange={(e) => setAdvanceDepositNote(e.target.value)}
+                        className="w-full p-2 border rounded-lg text-slate-900"
+                      />
+                    </div>
+
                     <button
                       type="submit"
-                      className="w-full py-2.5 bg-purple-900 hover:bg-purple-800 text-white font-bold text-xs rounded-xl transition-colors flex items-center justify-center gap-1.5"
+                      className="w-full py-2.5 bg-purple-900 hover:bg-purple-800 text-white font-bold text-xs rounded-xl transition-colors inline-flex justify-center items-center gap-1.5 cursor-pointer shadow-xs"
                     >
                       <ShieldCheck size={15} /> Review & Confirm Advance Payment
                     </button>

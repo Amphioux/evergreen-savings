@@ -3,7 +3,16 @@
 import { useState, useMemo } from 'react';
 import { formatMonthLabel } from '@/lib/formatters';
 import DepositReceiptModal from './DepositReceiptModal';
-import { PiggyBank, Search, Filter, RotateCcw, ArrowUpDown, Printer } from 'lucide-react';
+import { 
+  PiggyBank, 
+  Search, 
+  Filter, 
+  RotateCcw, 
+  ArrowUpDown, 
+  Printer, 
+  AlertTriangle, 
+  FileText 
+} from 'lucide-react';
 
 interface MyDepositsLedgerProps {
   myDeposits: any[];
@@ -44,6 +53,7 @@ export default function MyDepositsLedger({ myDeposits = [], isAdmin }: MyDeposit
       const rawYear = rawMonth.slice(0, 4);
       const formattedMonth = formatMonthLabel(rawMonth).toLowerCase();
       const depositedBy = (dep.deposited_by_name || '').toLowerCase();
+      const depositNote = (dep.deposit_note || '').toLowerCase();
       const recordedBy = cleanRecordedName(dep.recorded_by_name).toLowerCase();
       const query = searchTerm.toLowerCase().trim();
 
@@ -54,6 +64,7 @@ export default function MyDepositsLedger({ myDeposits = [], isAdmin }: MyDeposit
         !formattedMonth.includes(query) && 
         !rawMonth.includes(query) &&
         !depositedBy.includes(query) &&
+        !depositNote.includes(query) &&
         !recordedBy.includes(query)
       ) {
         return false;
@@ -94,7 +105,7 @@ export default function MyDepositsLedger({ myDeposits = [], isAdmin }: MyDeposit
   }
 
   return (
-    <div className="personal-ledger-section bg-white rounded-2xl border border-emerald-200 shadow-sm overflow-hidden text-left print:border-none print:shadow-none">
+    <div className="personal-ledger-section bg-white rounded-2xl border border-emerald-200 shadow-xs overflow-hidden text-left font-sans print:border-none print:shadow-none">
       
       {/* Hide the Ledger during print if a single receipt is open */}
       <style type="text/css" media="print">
@@ -124,14 +135,14 @@ export default function MyDepositsLedger({ myDeposits = [], isAdmin }: MyDeposit
           </div>
           <div>
             <h3 className="font-bold text-base">My Personal Savings Ledger</h3>
-            <p className="text-xs text-emerald-200 print:text-slate-600">Personal contribution history and receipt vouchers</p>
+            <p className="text-xs text-emerald-200 print:text-slate-600 font-mono">Personal contribution history and receipt vouchers</p>
           </div>
         </div>
 
         <div className="flex items-center gap-3">
           <button
             onClick={() => window.print()}
-            className="px-3 py-2 bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 transition-colors print:hidden"
+            className="px-3 py-2 bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 transition-colors print:hidden cursor-pointer shadow-xs"
           >
             <Printer size={15} /> Print Ledger
           </button>
@@ -151,7 +162,7 @@ export default function MyDepositsLedger({ myDeposits = [], isAdmin }: MyDeposit
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
           <input
             type="text"
-            placeholder="Search by Deposit ID, Month, or Representative Name..."
+            placeholder="Search by Deposit ID, Month, Representative, or Reference Note..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             className="w-full pl-9 pr-8 py-2 text-xs border border-slate-300 rounded-xl bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-700 font-medium"
@@ -159,7 +170,7 @@ export default function MyDepositsLedger({ myDeposits = [], isAdmin }: MyDeposit
           {searchTerm && (
             <button
               onClick={() => setSearchTerm('')}
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 cursor-pointer"
             >
               <RotateCcw size={12} />
             </button>
@@ -202,7 +213,7 @@ export default function MyDepositsLedger({ myDeposits = [], isAdmin }: MyDeposit
           {(searchTerm || selectedYear || sortOption !== 'recorded_desc') && (
             <button
               onClick={handleResetFilters}
-              className="px-2.5 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-xl text-xs font-bold flex items-center gap-1 transition-colors"
+              className="px-2.5 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-xl text-xs font-bold flex items-center gap-1 transition-colors cursor-pointer"
             >
               <RotateCcw size={12} /> Reset
             </button>
@@ -231,6 +242,9 @@ export default function MyDepositsLedger({ myDeposits = [], isAdmin }: MyDeposit
               const rawMonth = dep.for_month?.slice(0, 7) || '';
               const cleanName = cleanRecordedName(dep.recorded_by_name);
 
+              const fineAmount = Number(dep.fine_amount || 0);
+              const fineDiscount = Number(dep.fine_discount_amount || 0);
+
               // Normalize profiles object / array from Supabase
               const profileObj = Array.isArray(dep.profiles) ? dep.profiles[0] : dep.profiles;
 
@@ -240,7 +254,7 @@ export default function MyDepositsLedger({ myDeposits = [], isAdmin }: MyDeposit
                   <td className="p-3 font-bold text-slate-800">
                     <div>{formatMonthLabel(rawMonth)}</div>
                     {dep.deposited_by_name ? (
-                      <div className="text-[10px] text-amber-900 font-semibold font-sans mt-0.5 print:text-slate-600">
+                      <div className="text-[10px] text-amber-950 font-semibold font-sans mt-0.5 print:text-slate-600">
                         Via Rep: {dep.deposited_by_name}
                       </div>
                     ) : (
@@ -248,9 +262,26 @@ export default function MyDepositsLedger({ myDeposits = [], isAdmin }: MyDeposit
                         Paid: Self (In Person)
                       </div>
                     )}
+                    {dep.deposit_note && (
+                      <div className="text-[10px] text-slate-500 font-mono italic mt-0.5 flex items-center gap-1">
+                        <FileText size={10} className="text-slate-400" /> "{dep.deposit_note}"
+                      </div>
+                    )}
                   </td>
                   <td className="p-3 text-right font-mono font-bold text-emerald-900 print:text-slate-900">
-                    NPR {Number(dep.amount_paid || 0).toLocaleString('en-IN')}
+                    <span className="block font-black text-sm">
+                      NPR {Number(dep.amount_paid || 0).toLocaleString('en-IN')}
+                    </span>
+                    {fineAmount > 0 && (
+                      <span className="inline-flex items-center gap-0.5 text-[9px] font-bold text-amber-900 bg-amber-100 border border-amber-200 px-1.5 py-0.2 rounded font-sans mt-0.5">
+                        <AlertTriangle size={9} /> +Fine NPR {fineAmount}
+                      </span>
+                    )}
+                    {fineDiscount > 0 && (
+                      <span className="inline-block text-[9px] font-bold text-emerald-800 bg-emerald-100 border border-emerald-200 px-1.5 py-0.2 rounded font-sans mt-0.5 ml-1">
+                        Waived NPR {fineDiscount}
+                      </span>
+                    )}
                   </td>
                   <td className="p-3 text-xs text-slate-500 font-mono">
                     {dep.created_at ? new Date(dep.created_at).toLocaleString('en-CA', { timeZone: 'Asia/Kathmandu' }) : dep.for_month || 'N/A'}
@@ -266,7 +297,12 @@ export default function MyDepositsLedger({ myDeposits = [], isAdmin }: MyDeposit
                       deposit_code,
                       for_month: rawMonth,
                       amount_paid: Number(dep.amount_paid || 0),
-                      created_at: dep.created_at ? dep.created_at.slice(0, 10) : undefined,
+                      fine_amount: fineAmount,
+                      fine_discount_amount: fineDiscount,
+                      fine_waived: Boolean(dep.fine_waived),
+                      fine_override_reason: dep.fine_override_reason,
+                      deposit_note: dep.deposit_note,
+                      created_at: dep.created_at,
                       member_name: profileObj?.full_name || 'Member',
                       member_account_id: profileObj?.account_id || 'N/A',
                       deposited_by_name: dep.deposited_by_name,
