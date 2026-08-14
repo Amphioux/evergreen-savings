@@ -4,7 +4,6 @@ import { cookies } from 'next/headers';
 import { redirect, notFound } from 'next/navigation';
 import PrintControls from './PrintControls';
 import { CheckCircle2, User, ShieldCheck } from 'lucide-react';
-import { formatMonthLabel } from '@/lib/formatters';
 
 export const revalidate = 0;
 
@@ -29,13 +28,15 @@ function cleanRecordedName(name?: string): string {
 export default async function LedgerPrintPage({
   searchParams,
 }: {
-  searchParams: Promise<{ type?: string; id?: string; year?: string; sort?: string }>;
+  searchParams: Promise<{ type?: string; id?: string; year?: string; sort?: string; member_id?: string; status?: string }>;
 }) {
   const params = await searchParams;
   const printType = params.type || 'portfolio';
   const targetId = params.id;
   const targetYear = params.year || '';
   const sortOrder = params.sort || 'date_desc';
+  const memberFilterId = params.member_id || '';
+  const statusFilter = params.status || 'ALL';
 
   const cookieStore = await cookies();
   const supabaseServer = createServerClient(
@@ -55,6 +56,15 @@ export default async function LedgerPrintPage({
 
   const currentUserId = user.id;
 
+  // Check if current user is an Admin / Superadmin
+  const { data: currentProfile } = await supabaseAdmin
+    .from('profiles')
+    .select('role, user_type')
+    .eq('id', currentUserId)
+    .single();
+
+  const isAdmin = currentProfile?.role === 'ADMIN' || currentProfile?.role === 'SUPER_ADMIN' || currentProfile?.role === 'SUPERADMIN';
+
   // 1. SINGLE LOAN STATEMENT PRINT
   if (printType === 'single') {
     if (!targetId) notFound();
@@ -70,6 +80,11 @@ export default async function LedgerPrintPage({
       .single();
 
     if (!loan) notFound();
+
+    // Member security check
+    if (!isAdmin && String(loan.borrower_id) !== String(currentUserId)) {
+      redirect('/loans');
+    }
 
     const { data: payments } = await supabaseAdmin
       .from('loan_payments')
@@ -88,7 +103,6 @@ export default async function LedgerPrintPage({
     return (
       <div className="min-h-screen bg-slate-100 p-4 sm:p-8 font-sans text-left print:bg-white print:p-0 print:min-h-0">
         
-        {/* STRICT SINGLE-PAGE PRINT OVERRIDE STYLES */}
         <style type="text/css" media="print">
           {`
             @page {
@@ -266,44 +280,55 @@ export default async function LedgerPrintPage({
     );
   }
 
-  // Fetch Member Loans & Repayments for Portfolio/Repayments reports
-  const { data: myLoansData } = await supabaseAdmin
-    .from('loans')
-    .select('*')
-    .eq('borrower_id', currentUserId)
-    .order('issue_date', { ascending: false });
+  // Fetch profiles, loans, and payments based on role permissions
+  const profilesQuery = supabaseAdmin.from('profiles').select('id, full_name, account_id, user_type');
+  const loansQuery = isAdmin 
+    ? supabaseAdmin.from('loans').select('*, borrower:profiles!borrower_id(full_name, account_id, user_type)').order('issue_date', { ascending: false })
+    : supabaseAdmin.from('loans').select('*, borrower:profiles!borrower_id(full_name, account_id, user_type)').eq('borrower_id', currentUserId).order('issue_date', { ascending: false });
 
-  const myLoans = myLoansData || [];
-  const loanIds = myLoans.map(l => String(l.id));
+  const [{ data: rawProfiles }, { data: rawLoans }, { data: rawPayments }] = await Promise.all([
+    profilesQuery,
+    loansQuery,
+    supabaseAdmin.from('loan_payments').select('*').order('payment_date', { ascending: false }),
+  ]);
 
-  const { data: myPaymentsData } = await supabaseAdmin
-    .from('loan_payments')
-    .select('*')
-    .in('loan_id', loanIds.length > 0 ? loanIds : ['00000000-0000-0000-0000-000000000000'])
-    .order('payment_date', { ascending: false });
+  const profileList = rawProfiles || [];
+  const loanList = rawLoans || [];
+  const paymentList = rawPayments || [];
 
-  const myPayments = myPaymentsData || [];
+  const loanIdsSet = new Set(loanList.map((l) => String(l.id)));
+  const relevantPayments = paymentList.filter((p) => loanIdsSet.has(String(p.loan_id)));
 
-  // 2. PERSONAL LOAN PORTFOLIO PRINT
+  // 2. DISBURSED LOANS PORTFOLIO REPORT (GROUP OR PERSONAL)
   if (printType === 'portfolio') {
-    let filteredLoans = myLoans.map(loan => {
-      const loanPayments = myPayments.filter(p => String(p.loan_id) === String(loan.id));
+    let filteredLoans = loanList.map((loan) => {
+      const loanPayments = relevantPayments.filter((p) => String(p.loan_id) === String(loan.id));
       const totalRepaid = loanPayments.reduce((sum, p) => sum + Number(p.principal_paid || 0), 0);
       const remainingBalance = Math.max(0, Number(loan.principal_amount || 0) - totalRepaid);
       const isPaidOff = remainingBalance <= 0 || loan.status === 'SETTLED' || loan.status === 'PAID_OFF';
       return { ...loan, remainingBalance, isPaidOff };
     });
 
-    if (targetYear) {
-      filteredLoans = filteredLoans.filter(l => (l.issue_date || l.created_at || '').slice(0, 4) === targetYear);
+    if (memberFilterId && isAdmin) {
+      filteredLoans = filteredLoans.filter((l) => String(l.borrower_id) === String(memberFilterId));
     }
 
-    const totalActiveBalance = filteredLoans.filter(l => !l.isPaidOff).reduce((sum, l) => sum + l.remainingBalance, 0);
+    if (statusFilter === 'ACTIVE') {
+      filteredLoans = filteredLoans.filter((l) => !l.isPaidOff);
+    } else if (statusFilter === 'PAID_OFF') {
+      filteredLoans = filteredLoans.filter((l) => l.isPaidOff);
+    }
+
+    if (targetYear) {
+      filteredLoans = filteredLoans.filter((l) => (l.issue_date || l.created_at || '').slice(0, 4) === targetYear);
+    }
+
+    const totalActiveBalance = filteredLoans.filter((l) => !l.isPaidOff).reduce((sum, l) => sum + l.remainingBalance, 0);
+    const totalDisbursedSum = filteredLoans.reduce((sum, l) => sum + Number(l.principal_amount || 0), 0);
 
     return (
       <div className="min-h-screen bg-slate-100 p-4 sm:p-8 font-sans text-left print:bg-white print:p-0 print:min-h-0">
         
-        {/* STRICT SINGLE-PAGE PRINT OVERRIDE STYLES */}
         <style type="text/css" media="print">
           {`
             @page {
@@ -342,21 +367,24 @@ export default async function LedgerPrintPage({
           `}
         </style>
 
-        <PrintControls title="My Personal Loans Portfolio" />
+        <PrintControls title={isAdmin ? "Disbursed Loans Audit Report" : "My Personal Loans Portfolio"} />
 
         <div className="printable-card-zone max-w-4xl mx-auto bg-white border border-slate-200 rounded-2xl shadow-xl p-8 space-y-6 print:border-none print:shadow-none print:p-0">
           <div className="text-center border-b border-slate-300 pb-4 mb-4">
             <h1 className="text-2xl font-black text-slate-900 uppercase tracking-wide">EVERGREEN SAVINGS GROUP</h1>
-            <p className="text-xs font-bold text-slate-600 uppercase tracking-wider">My Active & Closed Loan Portfolio Report</p>
+            <p className="text-xs font-bold text-slate-600 uppercase tracking-wider">
+              {isAdmin ? 'Official Group Disbursed Loan Audit Report' : 'My Active & Closed Loan Portfolio Report'}
+            </p>
             {targetYear && <p className="text-xs text-slate-500 font-mono font-bold mt-1">Filtered Year: {targetYear}</p>}
           </div>
 
-          <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl flex justify-between items-center text-xs">
+          <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl flex justify-between items-center text-xs font-mono">
             <div>
-              <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider block">Report Scope</span>
-              <strong className="text-slate-900 text-sm font-bold">{filteredLoans.length} Registered Loans</strong>
+              <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider block font-sans">Report Scope</span>
+              <strong className="text-slate-900 text-sm font-bold">{filteredLoans.length} Loans Registered</strong>
+              <span className="text-[11px] text-slate-500 block font-sans">Total Issued: NPR {totalDisbursedSum.toLocaleString('en-IN')}</span>
             </div>
-            <div className="text-right font-mono">
+            <div className="text-right">
               <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider block font-sans">Active Outstanding Balance</span>
               <strong className="text-amber-900 text-base font-black">NPR {totalActiveBalance.toLocaleString('en-IN')}</strong>
             </div>
@@ -367,6 +395,7 @@ export default async function LedgerPrintPage({
               <thead className="bg-slate-100 text-slate-700 uppercase font-bold border-b border-slate-200">
                 <tr>
                   <th className="p-3">Loan ID</th>
+                  <th className="p-3 font-sans">Borrower</th>
                   <th className="p-3">Disbursed Date</th>
                   <th className="p-3 text-right">Principal Issued</th>
                   <th className="p-3 text-right">Remaining Balance</th>
@@ -376,9 +405,16 @@ export default async function LedgerPrintPage({
               <tbody className="divide-y divide-slate-100">
                 {filteredLoans.map((loan) => {
                   const loan_code = loan.loan_code || `LN-${loan.id.toString().padStart(4, '0')}`;
+                  const borrowerName = loan.borrower?.full_name || 'Borrower';
+                  const accountId = loan.borrower?.account_id || 'N/A';
+
                   return (
                     <tr key={loan.id}>
                       <td className="p-3 font-bold text-slate-900">{loan_code}</td>
+                      <td className="p-3 font-sans">
+                        <strong className="text-slate-900 block">{borrowerName}</strong>
+                        <span className="text-[10px] text-slate-500 font-mono">Acc: {accountId}</span>
+                      </td>
                       <td className="p-3 text-slate-700">{loan.issue_date || 'N/A'}</td>
                       <td className="p-3 text-right font-bold text-slate-800">NPR {Number(loan.principal_amount || 0).toLocaleString('en-IN')}</td>
                       <td className="p-3 text-right font-bold text-amber-900">NPR {loan.remainingBalance.toLocaleString('en-IN')}</td>
@@ -391,7 +427,7 @@ export default async function LedgerPrintPage({
                   );
                 })}
                 {filteredLoans.length === 0 && (
-                  <tr><td colSpan={5} className="p-6 text-center text-slate-400 font-sans text-xs">No loan portfolio records found for the applied criteria.</td></tr>
+                  <tr><td colSpan={6} className="p-6 text-center text-slate-400 font-sans text-xs">No loan portfolio records found for the applied criteria.</td></tr>
                 )}
               </tbody>
             </table>
@@ -412,24 +448,40 @@ export default async function LedgerPrintPage({
     );
   }
 
-  // 3. PERSONAL REPAYMENT HISTORY PRINT
-  let filteredRepayments = myPayments.filter(p => {
-    if (targetYear && (p.payment_date || '').slice(0, 4) !== targetYear) return false;
-    return true;
+  // 3. REPAYMENT HISTORY STATEMENT PRINT (GROUP OR PERSONAL)
+  let filteredRepayments = relevantPayments.map((p) => {
+    const loan = loanList.find((l) => String(l.id) === String(p.loan_id));
+    const borrower = profileList.find((b) => String(b.id) === String(loan?.borrower_id));
+    return {
+      ...p,
+      borrower_id: loan?.borrower_id,
+      borrower_name: borrower?.full_name || loan?.borrower?.full_name || 'Borrower',
+      borrower_account_id: borrower?.account_id || loan?.borrower?.account_id || 'N/A',
+      loan_code: loan?.loan_code || `LN-${p.loan_id}`,
+    };
   });
+
+  if (memberFilterId && isAdmin) {
+    filteredRepayments = filteredRepayments.filter((p) => String(p.borrower_id) === String(memberFilterId));
+  }
+
+  if (targetYear) {
+    filteredRepayments = filteredRepayments.filter((p) => (p.payment_date || '').slice(0, 4) === targetYear);
+  }
 
   filteredRepayments.sort((a, b) => {
     const dateA = new Date(a.payment_date).getTime();
     const dateB = new Date(b.payment_date).getTime();
-    return sortOrder === 'date_desc' ? dateB - dateA : dateA - dateB;
+    return sortOrder === 'date_asc' ? dateA - dateB : dateB - dateA;
   });
 
-  const totalFilteredPaid = filteredRepayments.reduce((sum, p) => sum + Number(p.principal_paid || 0) + Number(p.interest_paid || 0), 0);
+  const totalFilteredPrincipal = filteredRepayments.reduce((sum, p) => sum + Number(p.principal_paid || 0), 0);
+  const totalFilteredInterest = filteredRepayments.reduce((sum, p) => sum + Number(p.interest_paid || 0), 0);
+  const totalFilteredPaid = totalFilteredPrincipal + totalFilteredInterest;
 
   return (
     <div className="min-h-screen bg-slate-100 p-4 sm:p-8 font-sans text-left print:bg-white print:p-0 print:min-h-0">
       
-      {/* STRICT SINGLE-PAGE PRINT OVERRIDE STYLES */}
       <style type="text/css" media="print">
         {`
           @page {
@@ -468,12 +520,14 @@ export default async function LedgerPrintPage({
         `}
       </style>
 
-      <PrintControls title="My Loan Repayment History" />
+      <PrintControls title={isAdmin ? "Repayment History Audit Report" : "My Loan Repayment History"} />
 
       <div className="printable-card-zone max-w-4xl mx-auto bg-white border border-slate-200 rounded-2xl shadow-xl p-8 space-y-6 print:border-none print:shadow-none print:p-0">
         <div className="text-center border-b border-slate-300 pb-4 mb-4">
           <h1 className="text-2xl font-black text-slate-900 uppercase tracking-wide">EVERGREEN SAVINGS GROUP</h1>
-          <p className="text-xs font-bold text-slate-600 uppercase tracking-wider">My Consolidated Repayment History Statement</p>
+          <p className="text-xs font-bold text-slate-600 uppercase tracking-wider">
+            {isAdmin ? 'Official Group Loan Repayment Audit Report' : 'My Consolidated Repayment History Statement'}
+          </p>
           {targetYear && <p className="text-xs text-slate-500 font-mono font-bold mt-1">Filtered Year: {targetYear}</p>}
         </div>
 
@@ -483,7 +537,7 @@ export default async function LedgerPrintPage({
             <strong className="text-slate-900 text-sm font-bold">{filteredRepayments.length} Vouchers</strong>
           </div>
           <div className="text-right font-mono">
-            <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider block font-sans">Total Paid</span>
+            <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider block font-sans">Total Gross Paid</span>
             <strong className="text-emerald-950 text-base font-black">NPR {totalFilteredPaid.toLocaleString('en-IN')}</strong>
           </div>
         </div>
@@ -494,7 +548,7 @@ export default async function LedgerPrintPage({
               <tr>
                 <th className="p-3">Payment ID</th>
                 <th className="p-3">Payment Date</th>
-                <th className="p-3">Loan Ref</th>
+                <th className="p-3 font-sans">Borrower & Loan</th>
                 <th className="p-3 text-right">Principal Paid</th>
                 <th className="p-3 text-right">Interest Paid</th>
                 <th className="p-3 text-right">Total Paid</th>
@@ -503,15 +557,16 @@ export default async function LedgerPrintPage({
             <tbody className="divide-y divide-slate-100">
               {filteredRepayments.map((p) => {
                 const payment_code = p.payment_code || `PY-${p.id}`;
-                const loan = myLoans.find(l => String(l.id) === String(p.loan_id));
-                const loan_code = loan?.loan_code || `LN-${p.loan_id}`;
                 const totalPaid = Number(p.principal_paid || 0) + Number(p.interest_paid || 0);
 
                 return (
                   <tr key={p.id}>
                     <td className="p-3 font-bold text-slate-900">{payment_code}</td>
                     <td className="p-3 text-slate-700">{p.payment_date}</td>
-                    <td className="p-3 text-slate-500">{loan_code}</td>
+                    <td className="p-3 font-sans">
+                      <strong className="text-slate-900 block">{p.borrower_name}</strong>
+                      <span className="text-[10px] text-slate-500 font-mono">Code: {p.loan_code}</span>
+                    </td>
                     <td className="p-3 text-right font-bold text-emerald-800">NPR {Number(p.principal_paid || 0).toLocaleString('en-IN')}</td>
                     <td className="p-3 text-right font-bold text-purple-800">NPR {Number(p.interest_paid || 0).toLocaleString('en-IN')}</td>
                     <td className="p-3 text-right font-black text-slate-900">NPR {totalPaid.toLocaleString('en-IN')}</td>
@@ -527,10 +582,10 @@ export default async function LedgerPrintPage({
                 <tr>
                   <td colSpan={3} className="p-3 text-left uppercase text-xs font-black">Total Repayments</td>
                   <td className="p-3 text-right font-mono text-xs font-black text-emerald-900">
-                    NPR {filteredRepayments.reduce((sum, p) => sum + Number(p.principal_paid || 0), 0).toLocaleString('en-IN')}
+                    NPR {totalFilteredPrincipal.toLocaleString('en-IN')}
                   </td>
                   <td className="p-3 text-right font-mono text-xs font-black text-purple-900">
-                    NPR {filteredRepayments.reduce((sum, p) => sum + Number(p.interest_paid || 0), 0).toLocaleString('en-IN')}
+                    NPR {totalFilteredInterest.toLocaleString('en-IN')}
                   </td>
                   <td className="p-3 text-right font-mono text-xs font-black text-slate-900">
                     NPR {totalFilteredPaid.toLocaleString('en-IN')}

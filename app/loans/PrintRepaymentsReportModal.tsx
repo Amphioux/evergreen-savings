@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Printer, X, FileText, CheckCircle2 } from 'lucide-react';
+import { Printer, X, FileText, CheckCircle2, Eye } from 'lucide-react';
 
 interface PrintRepaymentsReportModalProps {
   repaymentHistory: any[];
@@ -35,45 +35,59 @@ export default function PrintRepaymentsReportModal({
   );
   const totalCollected = totalPrincipal + totalInterest;
 
+  function handleOpenDedicatedPrintPage() {
+    const queryParams = new URLSearchParams();
+    queryParams.set('type', 'repayments');
+
+    window.open(`/loans/ledger-print?${queryParams.toString()}`, '_blank', 'width=1000,height=800,scrollbars=yes');
+  }
+
   return (
     <>
+      {/* 1. Directory Button Renamed to "See Details" */}
       <button
+        type="button"
         onClick={() => setIsOpen(true)}
-        className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-lg flex items-center gap-1.5 transition-colors whitespace-nowrap print:hidden"
+        className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-lg flex items-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer shadow-xs"
       >
-        <Printer size={14} /> Print Repayments Report
+        <Eye size={14} /> See Details
       </button>
 
+      {/* 2. Detailed Report Window Modal */}
       {isOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 text-left">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full border border-slate-200 overflow-hidden print:shadow-none print:border-none print:w-full print:max-w-none">
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 text-left font-sans">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full border border-slate-200 overflow-hidden">
             {/* Modal Controls Bar */}
-            <div className="p-4 bg-slate-900 text-white flex justify-between items-center print:hidden">
+            <div className="p-4 bg-slate-900 text-white flex justify-between items-center">
               <div className="flex items-center gap-2">
                 <FileText size={18} className="text-purple-400" />
-                <h3 className="font-bold text-sm">Loan Repayment Summary Report</h3>
+                <h3 className="font-bold text-sm">Loan Repayments Detailed Report</h3>
               </div>
               <div className="flex items-center gap-2">
                 <button
-                  onClick={() => window.print()}
-                  className="px-3.5 py-1.5 bg-purple-700 hover:bg-purple-600 text-white font-bold text-xs rounded-lg flex items-center gap-1.5 transition-colors"
+                  type="button"
+                  onClick={handleOpenDedicatedPrintPage}
+                  className="px-3.5 py-1.5 bg-purple-700 hover:bg-purple-600 text-white font-bold text-xs rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+                  title="Print report on dedicated printable page"
                 >
                   <Printer size={14} /> Print Report
                 </button>
+
                 <button
+                  type="button"
                   onClick={() => setIsOpen(false)}
-                  className="text-slate-400 hover:text-white p-1"
+                  className="text-slate-400 hover:text-white p-1 cursor-pointer"
                 >
                   <X size={18} />
                 </button>
               </div>
             </div>
 
-            {/* Printable Report Output Container */}
-            <div className="p-6 space-y-5 text-slate-900 font-mono text-xs max-h-[80vh] overflow-y-auto print:max-h-none print:overflow-visible print:p-0">
+            {/* Detailed Preview Body */}
+            <div className="p-6 space-y-5 text-slate-900 font-mono text-xs max-h-[80vh] overflow-y-auto">
               {/* Header */}
               <div className="text-center border-b border-slate-300 pb-3 space-y-1">
-                <h1 className="text-2xl font-black text-slate-900 uppercase">
+                <h1 className="text-2xl font-black text-slate-900 uppercase tracking-tight">
                   EVERGREEN SAVINGS GROUP
                 </h1>
                 <p className="text-xs text-slate-600 font-bold uppercase tracking-wider">
@@ -85,7 +99,7 @@ export default function PrintRepaymentsReportModal({
               </div>
 
               {/* KPI Summary Block */}
-              <div className="grid grid-cols-3 gap-3 p-3 bg-slate-50 border border-slate-200 rounded-xl font-sans print:border-slate-300">
+              <div className="grid grid-cols-3 gap-3 p-3 bg-slate-50 border border-slate-200 rounded-xl font-sans">
                 <div>
                   <span className="text-slate-500 block text-[10px] font-bold uppercase">
                     Total Principal Repaid
@@ -113,17 +127,17 @@ export default function PrintRepaymentsReportModal({
               </div>
 
               {/* Repayments Table */}
-              <div className="border border-slate-200 rounded-xl overflow-hidden print:border-slate-300">
+              <div className="border border-slate-200 rounded-xl overflow-hidden">
                 <table className="w-full text-left text-xs font-mono">
                   <thead className="bg-slate-100 text-slate-700 uppercase text-[10px] border-b border-slate-200">
                     <tr>
                       <th className="p-2.5">Payment ID</th>
                       <th className="p-2.5">Date</th>
-                      <th className="p-2.5">Loan & Borrower</th>
+                      <th className="p-2.5 font-sans">Loan & Borrower</th>
                       <th className="p-2.5 text-right">Principal</th>
                       <th className="p-2.5 text-right">Interest</th>
                       <th className="p-2.5 text-right">Total Paid</th>
-                      <th className="p-2.5">Authorized By</th>
+                      <th className="p-2.5 font-sans">Authorized By</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
@@ -167,14 +181,14 @@ export default function PrintRepaymentsReportModal({
               </div>
 
               {/* Signature Footer */}
-              <div className="pt-8 border-t-2 border-slate-900 mt-8 grid grid-cols-2 gap-8 text-xs font-mono">
-                <div className="space-y-1 font-sans">
+              <div className="pt-8 border-t-2 border-slate-900 mt-8 grid grid-cols-2 gap-8 text-xs font-mono font-sans">
+                <div className="space-y-1">
                   <div className="font-bold text-slate-900 uppercase">Audit Trail Details:</div>
                   <div>Generated Date: <strong>{getKathmanduPrintTimestamp()}</strong></div>
                   <div>Total Transactions: <strong>{repaymentHistory.length} Logged Payments</strong></div>
                 </div>
 
-                <div className="text-center flex flex-col justify-end items-center font-sans">
+                <div className="text-center flex flex-col justify-end items-center">
                   <div className="border-b border-slate-400 w-56 mb-1 h-10"></div>
                   <span className="font-bold text-slate-900 uppercase text-[11px]">
                     Authorized Executive Seal & Signature

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useMemo } from 'react';
-import { Printer, X, FileText, Calendar, RotateCcw, User } from 'lucide-react';
+import { Printer, X, FileText, Calendar, RotateCcw, User, Eye } from 'lucide-react';
 
 interface PrintLoansReportModalProps {
   loanList: any[];
@@ -35,29 +35,40 @@ export default function PrintLoansReportModal({
   const [reportEndDate, setReportEndDate] = useState('');
   const [selectedMemberId, setSelectedMemberId] = useState('');
 
-  function handlePrint() {
-    window.print();
+  // Dedicated Print Page Launcher with Active Filters
+  function handleOpenDedicatedPrintPage() {
+    const queryParams = new URLSearchParams();
+    queryParams.set('type', 'portfolio');
+
+    if (selectedMemberId) queryParams.set('member_id', selectedMemberId);
+    if (statusFilter !== 'ALL') queryParams.set('status', statusFilter);
+    if (reportStartDate) {
+      const year = reportStartDate.slice(0, 4);
+      queryParams.set('year', year);
+    }
+
+    window.open(`/loans/ledger-print?${queryParams.toString()}`, '_blank', 'width=1000,height=800,scrollbars=yes');
   }
 
-  // Active borrowers for the dropdown excluding Admins and Super Admins (alphabetical order)
+  // Active borrowers for the dropdown
   const activeBorrowers = useMemo(() => {
     return profiles
       .filter((p) => p.role !== 'ADMIN' && p.role !== 'SUPER_ADMIN')
       .sort((a, b) => a.full_name.localeCompare(b.full_name));
   }, [profiles]);
 
-  // Get selected member name for the print header
+  // Selected member name
   const selectedMemberName = useMemo(() => {
     if (!selectedMemberId) return null;
-    return profiles.find((p) => p.id === selectedMemberId)?.full_name || 'Unknown Member';
+    return profiles.find((p) => String(p.id) === String(selectedMemberId))?.full_name || 'Unknown Member';
   }, [selectedMemberId, profiles]);
 
   // Enrich and Filter Loans
   const filteredLoans = useMemo(() => {
     return loanList
       .map((loan) => {
-        const borrower = profiles.find((p) => p.id === loan.borrower_id) || { full_name: 'Unknown', account_id: 'N/A' };
-        const guarantor = profiles.find((p) => p.id === loan.guarantor_id);
+        const borrower = profiles.find((p) => String(p.id) === String(loan.borrower_id)) || { full_name: 'Unknown', account_id: 'N/A' };
+        const guarantor = profiles.find((p) => String(p.id) === String(loan.guarantor_id));
         const loanPayments = paymentList.filter((p) => String(p.loan_id) === String(loan.id));
         const totalRepaid = loanPayments.reduce((sum, p) => sum + Number(p.principal_paid || 0), 0);
         const remainingBalance = Math.max(0, Number(loan.principal_amount || 0) - totalRepaid);
@@ -74,14 +85,9 @@ export default function PrintLoansReportModal({
         };
       })
       .filter((loan) => {
-        // Apply Member Filter
         if (selectedMemberId && String(loan.borrower_id) !== String(selectedMemberId)) return false;
-
-        // Apply Status Filter
         if (statusFilter === 'ACTIVE' && loan.isPaidOff) return false;
         if (statusFilter === 'PAID_OFF' && !loan.isPaidOff) return false;
-
-        // Apply Date Filter
         if (reportStartDate && loan.issue_date < reportStartDate) return false;
         if (reportEndDate && loan.issue_date > reportEndDate) return false;
 
@@ -99,22 +105,25 @@ export default function PrintLoansReportModal({
 
   return (
     <>
+      {/* 1. Directory Button Renamed to "See Details" */}
       <button
+        type="button"
         onClick={() => setIsOpen(true)}
-        className="px-3 py-1.5 text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg flex items-center gap-1.5 transition-colors border border-slate-300 print:hidden"
+        className="px-3 py-1.5 text-xs font-bold bg-slate-900 hover:bg-slate-800 text-white rounded-lg flex items-center gap-1.5 transition-colors border border-slate-900 cursor-pointer shadow-xs"
       >
-        <Printer size={14} /> Print Report
+        <Eye size={14} /> See Details
       </button>
 
+      {/* 2. Detailed Report Window Modal */}
       {isOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 text-left">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-[1400px] w-full border border-slate-200 overflow-hidden print:shadow-none print:border-none print:w-full print:max-w-none">
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 text-left font-sans">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-[1400px] w-full border border-slate-200 overflow-hidden">
             
             {/* Modal Controls Bar */}
-            <div className="p-4 bg-slate-900 text-white flex flex-col 2xl:flex-row 2xl:items-center justify-between gap-3 print:hidden">
+            <div className="p-4 bg-slate-900 text-white flex flex-col 2xl:flex-row 2xl:items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <FileText size={18} className="text-blue-400" />
-                <h3 className="font-bold text-sm whitespace-nowrap">Disbursed Loans Report</h3>
+                <h3 className="font-bold text-sm whitespace-nowrap">Disbursed Loans Detailed Report</h3>
               </div>
 
               <div className="flex flex-wrap items-center gap-2 w-full 2xl:w-auto justify-between 2xl:justify-end">
@@ -125,7 +134,7 @@ export default function PrintLoansReportModal({
                   <select
                     value={selectedMemberId}
                     onChange={(e) => setSelectedMemberId(e.target.value)}
-                    className="bg-slate-700 text-white border border-slate-600 rounded px-1.5 py-0.5 text-xs focus:outline-none max-w-[150px] truncate"
+                    className="bg-slate-700 text-white border border-slate-600 rounded px-1.5 py-0.5 text-xs focus:outline-none max-w-[150px] truncate cursor-pointer"
                     title="Filter by Member"
                   >
                     <option value="">All Members</option>
@@ -157,11 +166,12 @@ export default function PrintLoansReportModal({
                   />
                   {(reportStartDate || reportEndDate) && (
                     <button
+                      type="button"
                       onClick={() => {
                         setReportStartDate('');
                         setReportEndDate('');
                       }}
-                      className="p-1 text-slate-400 hover:text-red-400 transition-colors"
+                      className="p-1 text-slate-400 hover:text-red-400 transition-colors cursor-pointer"
                       title="Clear Date Filter"
                     >
                       <RotateCcw size={12} />
@@ -172,46 +182,56 @@ export default function PrintLoansReportModal({
                 {/* Status Filter */}
                 <div className="flex bg-slate-800 p-0.5 rounded-lg text-xs font-semibold">
                   <button
+                    type="button"
                     onClick={() => setStatusFilter('ALL')}
-                    className={`px-2.5 py-1 rounded-md transition-colors ${statusFilter === 'ALL' ? 'bg-blue-800 text-white' : 'text-slate-400 hover:text-white'}`}
+                    className={`px-2.5 py-1 rounded-md transition-colors cursor-pointer ${statusFilter === 'ALL' ? 'bg-blue-800 text-white' : 'text-slate-400 hover:text-white'}`}
                   >
                     All
                   </button>
                   <button
+                    type="button"
                     onClick={() => setStatusFilter('ACTIVE')}
-                    className={`px-2.5 py-1 rounded-md transition-colors ${statusFilter === 'ACTIVE' ? 'bg-amber-700 text-white' : 'text-slate-400 hover:text-white'}`}
+                    className={`px-2.5 py-1 rounded-md transition-colors cursor-pointer ${statusFilter === 'ACTIVE' ? 'bg-amber-700 text-white' : 'text-slate-400 hover:text-white'}`}
                   >
                     Active
                   </button>
                   <button
+                    type="button"
                     onClick={() => setStatusFilter('PAID_OFF')}
-                    className={`px-2.5 py-1 rounded-md transition-colors ${statusFilter === 'PAID_OFF' ? 'bg-emerald-800 text-white' : 'text-slate-400 hover:text-white'}`}
+                    className={`px-2.5 py-1 rounded-md transition-colors cursor-pointer ${statusFilter === 'PAID_OFF' ? 'bg-emerald-800 text-white' : 'text-slate-400 hover:text-white'}`}
                   >
                     Paid Off
                   </button>
                 </div>
 
-                {/* Actions */}
+                {/* Single Print Action Button */}
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={handlePrint}
-                    className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-xs rounded-lg flex items-center gap-1.5 transition-colors"
+                    type="button"
+                    onClick={handleOpenDedicatedPrintPage}
+                    className="px-3.5 py-1.5 bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-xs rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+                    title="Print report on dedicated printable page"
                   >
-                    <Printer size={14} /> Print / PDF
+                    <Printer size={14} /> Print Report
                   </button>
-                  <button onClick={() => setIsOpen(false)} className="text-slate-400 hover:text-white p-1 ml-1">
+
+                  <button 
+                    type="button"
+                    onClick={() => setIsOpen(false)} 
+                    className="text-slate-400 hover:text-white p-1 ml-1 cursor-pointer"
+                  >
                     <X size={18} />
                   </button>
                 </div>
               </div>
             </div>
 
-            {/* Printable Report Output Container */}
-            <div className="p-6 space-y-4 text-slate-900 print:p-0 max-h-[80vh] overflow-y-auto print:max-h-none print:overflow-visible">
+            {/* Detailed Report Preview Body */}
+            <div className="p-6 space-y-4 text-slate-900 max-h-[80vh] overflow-y-auto">
               
               {/* Header */}
               <div className="text-center border-b border-slate-200 pb-3 space-y-0.5">
-                <h2 className="text-xl font-extrabold text-slate-900 tracking-tight">EVERGREEN SAVINGS GROUP</h2>
+                <h2 className="text-xl font-extrabold text-slate-900 tracking-tight uppercase">EVERGREEN SAVINGS GROUP</h2>
                 <p className="text-xs text-slate-500 font-semibold uppercase tracking-wider">
                   Disbursed Loan Audit Report — {statusFilter === 'ALL' ? 'All Loans' : statusFilter === 'ACTIVE' ? 'Active Loans Only' : 'Paid Off Loans Only'}
                 </p>
@@ -222,7 +242,7 @@ export default function PrintLoansReportModal({
 
               {/* Active Filters Summary Block */}
               {(reportStartDate || reportEndDate || selectedMemberName) && (
-                <div className="p-2 bg-blue-50 border border-blue-200 rounded-lg text-blue-900 font-sans text-xs flex flex-wrap gap-4 justify-between items-center print:border-slate-300">
+                <div className="p-2 bg-blue-50 border border-blue-200 rounded-lg text-blue-900 font-sans text-xs flex flex-wrap gap-4 justify-between items-center">
                   <div className="flex flex-wrap gap-4">
                     {selectedMemberName && (
                       <span>Member Filter: <strong>{selectedMemberName}</strong></span>
@@ -236,7 +256,7 @@ export default function PrintLoansReportModal({
               )}
 
               {/* KPI Summary Block */}
-              <div className="grid grid-cols-3 gap-3 text-xs font-mono p-3 bg-slate-50 border border-slate-200 rounded-xl print:border-slate-300">
+              <div className="grid grid-cols-3 gap-3 text-xs font-mono p-3 bg-slate-50 border border-slate-200 rounded-xl">
                 <div>
                   <span className="text-slate-500 block text-[10px] font-sans uppercase font-bold">Total Loans</span>
                   <strong className="text-slate-900 text-sm">{filteredLoans.length} Loans</strong>
@@ -256,12 +276,12 @@ export default function PrintLoansReportModal({
                 <thead className="bg-slate-100 text-slate-700 uppercase font-bold border-b border-slate-300 text-[10px]">
                   <tr>
                     <th className="p-2">Loan ID</th>
-                    <th className="p-2">Borrower</th>
+                    <th className="p-2 font-sans">Borrower</th>
                     <th className="p-2">Disbursed Date</th>
                     <th className="p-2 text-right">Principal</th>
                     <th className="p-2 text-right">Rate</th>
                     <th className="p-2 text-right">Remaining Bal.</th>
-                    <th className="p-2 text-right">Status</th>
+                    <th className="p-2 text-right font-sans">Status</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200">
@@ -271,7 +291,7 @@ export default function PrintLoansReportModal({
                       <td className="p-2 font-sans font-semibold text-slate-900">
                         {loan.borrower_name}
                         {loan.guarantor_name && (
-                          <span className="block text-[10px] text-amber-800 font-normal">
+                          <span className="block text-[10px] text-amber-800 font-normal font-sans">
                             Guarantor: {loan.guarantor_name}
                           </span>
                         )}
@@ -282,7 +302,7 @@ export default function PrintLoansReportModal({
                       <td className="p-2 text-right font-bold text-slate-900 font-mono">
                         NPR {loan.remaining_balance.toLocaleString('en-IN')}
                       </td>
-                      <td className="p-2 text-right">
+                      <td className="p-2 text-right font-sans">
                         <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
                           loan.isPaidOff ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
                         }`}>
@@ -302,7 +322,7 @@ export default function PrintLoansReportModal({
               </table>
 
               {/* Signature Footer */}
-              <div className="pt-8 grid grid-cols-2 gap-8 text-center text-[11px] text-slate-500 font-semibold border-t border-slate-200 mt-6">
+              <div className="pt-8 grid grid-cols-2 gap-8 text-center text-[11px] text-slate-500 font-semibold border-t border-slate-200 mt-6 font-sans">
                 <div>
                   <div className="border-b border-slate-400 mb-1 h-8 w-48 mx-auto"></div>
                   <span>Prepared By / Committee Secretary</span>

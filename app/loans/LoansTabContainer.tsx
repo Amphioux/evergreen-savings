@@ -3,13 +3,37 @@
 import { useState, useMemo } from 'react';
 import IssueLoanForm from './IssueLoanForm';
 import RecordRepaymentForm from './RecordRepaymentForm';
+import LoanLateFeeCollectionTab from './LoanLateFeeCollectionTab';
+import FineRepaymentsLedgerTable from './FineRepaymentsLedgerTable';
+import GroupLoansLedgerTable from './GroupLoansLedgerTable';
 import RepaymentReceiptModal from './RepaymentReceiptModal';
 import EditLoanModal from './EditLoanModal';
 import EditPaymentModal from './EditPaymentModal';
 import PrintLoansReportModal from './PrintLoansReportModal';
 import PrintRepaymentsReportModal from './PrintRepaymentsReportModal';
 import LoanDetailsModal from './LoanDetailsModal';
-import { Banknote, Receipt, ListFilter, ShieldCheck, History, Search, Filter, Calendar, RotateCcw, Lock, UserCheck } from 'lucide-react';
+import DeleteLoanConfirmModal from './DeleteLoanConfirmModal';
+import { 
+  Banknote, 
+  Receipt, 
+  ListFilter, 
+  ShieldCheck, 
+  History, 
+  Search, 
+  Filter, 
+  Calendar, 
+  RotateCcw, 
+  Lock, 
+  UserCheck, 
+  ChevronLeft, 
+  ChevronRight,
+  ShieldAlert,
+  Sparkles,
+  Briefcase,
+  Wallet,
+  Users,
+  ArrowRight
+} from 'lucide-react';
 
 interface LoansTabContainerProps {
   currentUserId?: string;
@@ -20,6 +44,9 @@ interface LoansTabContainerProps {
   paymentList: any[];
   activeLoans: any[];
   repaymentHistory: any[];
+  fineRules?: any[];
+  selectedLoanIdForRepayment?: string | number;
+  initialActiveTab?: string;
 }
 
 export default function LoansTabContainer({
@@ -31,24 +58,45 @@ export default function LoansTabContainer({
   paymentList = [],
   activeLoans = [],
   repaymentHistory = [],
+  fineRules = [],
+  selectedLoanIdForRepayment,
+  initialActiveTab = 'DIRECTORY',
 }: LoansTabContainerProps) {
-  const [activeTab, setActiveTab] = useState<'DIRECTORY' | 'HISTORY' | 'DISBURSE' | 'REPAYMENT'>('DIRECTORY');
+  
+  // PARENT TAB STATE: 'PORTFOLIO' | 'REPAYMENTS'
+  const [parentTab, setParentTab] = useState<'PORTFOLIO' | 'REPAYMENTS'>(
+    initialActiveTab === 'REPAYMENT' || initialActiveTab === 'LATE_FEE_COLLECTION' || initialActiveTab === 'HISTORY' || initialActiveTab === 'FINE_REPAYMENTS_LEDGER'
+      ? 'REPAYMENTS'
+      : 'PORTFOLIO'
+  );
 
-  // Resolve current logged-in Admin Profile for auto-populating loan approvals
+  // SUB-TAB STATES
+  const [portfolioSubTab, setPortfolioSubTab] = useState<'DIRECTORY' | 'DISBURSE' | 'GROUP_LEDGER'>(
+    initialActiveTab === 'DISBURSE' ? 'DISBURSE' : 'DIRECTORY'
+  );
+
+  const [repaymentSubTab, setRepaymentSubTab] = useState<'HISTORY' | 'REPAYMENT' | 'LATE_FEE_COLLECTION' | 'FINE_REPAYMENTS_LEDGER'>(
+    initialActiveTab === 'LATE_FEE_COLLECTION' ? 'LATE_FEE_COLLECTION' : (initialActiveTab as any) || 'HISTORY'
+  );
+
   const currentAdmin = useMemo(() => {
     return profiles.find((p) => String(p.id) === String(currentUserId));
   }, [profiles, currentUserId]);
 
-  // Directory Filter States
+  // Directory Filter & Pagination States
   const [directorySearch, setDirectorySearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'ACTIVE' | 'PAID_OFF'>('ALL');
   const [dirStartDate, setDirStartDate] = useState('');
   const [dirEndDate, setDirEndDate] = useState('');
+  const [dirPage, setDirPage] = useState(1);
+  const [dirPageSize, setDirPageSize] = useState(5);
 
-  // History Filter States
+  // History Filter & Pagination States
   const [historySearch, setHistorySearch] = useState('');
   const [histStartDate, setHistStartDate] = useState('');
   const [histEndDate, setHistEndDate] = useState('');
+  const [histPage, setHistPage] = useState(1);
+  const [histPageSize, setHistPageSize] = useState(5);
 
   // Enriched Loans
   const enrichedLoanList = useMemo(() => {
@@ -77,7 +125,7 @@ export default function LoansTabContainer({
     });
   }, [loanList, paymentList, profiles]);
 
-  // Filtered & Sorted Disbursed Loans Directory
+  // Filtered Loans
   const filteredLoanList = useMemo(() => {
     return enrichedLoanList
       .filter((loan) => {
@@ -104,7 +152,14 @@ export default function LoansTabContainer({
       });
   }, [enrichedLoanList, statusFilter, directorySearch, dirStartDate, dirEndDate, isAdmin]);
 
-  // Filtered & Sorted Repayment History
+  // Paginated Directory Loans
+  const totalDirPages = Math.ceil(filteredLoanList.length / dirPageSize) || 1;
+  const paginatedDirectoryLoans = useMemo(() => {
+    const start = (dirPage - 1) * dirPageSize;
+    return filteredLoanList.slice(start, start + dirPageSize);
+  }, [filteredLoanList, dirPage, dirPageSize]);
+
+  // Filtered Repayment History
   const filteredRepaymentHistory = useMemo(() => {
     return (repaymentHistory || [])
       .filter((record) => {
@@ -128,151 +183,254 @@ export default function LoansTabContainer({
       });
   }, [repaymentHistory, historySearch, histStartDate, histEndDate, isAdmin]);
 
+  // Paginated Repayments
+  const totalHistPages = Math.ceil(filteredRepaymentHistory.length / histPageSize) || 1;
+  const paginatedRepayments = useMemo(() => {
+    const start = (histPage - 1) * histPageSize;
+    return filteredRepaymentHistory.slice(start, start + histPageSize);
+  }, [filteredRepaymentHistory, histPage, histPageSize]);
+
   const totalPrincipalRepaid = filteredRepaymentHistory.reduce((sum, r) => sum + Number(r?.principal_paid || 0), 0);
   const totalInterestCollected = filteredRepaymentHistory.reduce((sum, r) => sum + Number(r?.interest_paid || 0), 0);
 
   return (
-    <div className="space-y-6 text-left">
-      {/* Sub Navigation Tabs (Unified Amber Theme) */}
-      <div className="flex border-b border-slate-200 text-xs sm:text-sm font-bold gap-2 overflow-x-auto">
+    <div className="space-y-6 text-left font-sans">
+      
+      {/* LEVEL 1: MAIN PARENT TAB BAR */}
+      <div className="flex border-b-2 border-slate-200 text-sm font-black space-x-2">
+        
+        {/* Parent Tab 1: Loan Portfolio Management */}
         <button
-          onClick={() => setActiveTab('DIRECTORY')}
-          className={`flex items-center gap-1.5 px-4 py-2.5 border-b-2 whitespace-nowrap transition-colors ${
-            activeTab === 'DIRECTORY'
-              ? 'border-amber-800 text-amber-950 bg-amber-50/50 font-extrabold'
-              : 'border-transparent text-slate-500 hover:text-slate-900'
+          type="button"
+          onClick={() => setParentTab('PORTFOLIO')}
+          className={`flex items-center gap-2 px-5 py-3 border-b-4 transition-all cursor-pointer ${
+            parentTab === 'PORTFOLIO'
+              ? 'border-blue-700 text-blue-950 bg-blue-50/70'
+              : 'border-transparent text-slate-500 hover:text-slate-800'
           }`}
         >
-          <ListFilter size={16} /> Disbursed Loans Directory ({loanList.length})
+          <Briefcase size={18} className={parentTab === 'PORTFOLIO' ? 'text-blue-700' : 'text-slate-400'} />
+          <span>LOAN DISBURSEMENT & PORTFOLIO</span>
+          <span className="text-xs font-mono font-bold px-2 py-0.5 bg-blue-200 text-blue-950 rounded-full">
+            {loanList.length}
+          </span>
         </button>
 
+        {/* Parent Tab 2: Loan Repayments & Treasury */}
         <button
-          onClick={() => setActiveTab('HISTORY')}
-          className={`flex items-center gap-1.5 px-4 py-2.5 border-b-2 whitespace-nowrap transition-colors ${
-            activeTab === 'HISTORY'
-              ? 'border-amber-800 text-amber-950 bg-amber-50/50 font-extrabold'
-              : 'border-transparent text-slate-500 hover:text-slate-900'
+          type="button"
+          onClick={() => setParentTab('REPAYMENTS')}
+          className={`flex items-center gap-2 px-5 py-3 border-b-4 transition-all cursor-pointer ${
+            parentTab === 'REPAYMENTS'
+              ? 'border-emerald-700 text-emerald-950 bg-emerald-50/70'
+              : 'border-transparent text-slate-500 hover:text-slate-800'
           }`}
         >
-          <History size={16} /> Repayment History ({repaymentHistory.length})
+          <Wallet size={18} className={parentTab === 'REPAYMENTS' ? 'text-emerald-700' : 'text-slate-400'} />
+          <span>LOAN REPAYMENT & TREASURY</span>
+          <span className="text-xs font-mono font-bold px-2 py-0.5 bg-emerald-200 text-emerald-950 rounded-full">
+            {paymentList.length}
+          </span>
         </button>
 
-        {isAdmin && (
-          <>
-            <button
-              onClick={() => setActiveTab('DISBURSE')}
-              className={`flex items-center gap-1.5 px-4 py-2.5 border-b-2 whitespace-nowrap transition-colors ${
-                activeTab === 'DISBURSE'
-                  ? 'border-amber-800 text-amber-950 bg-amber-50/50 font-extrabold'
-                  : 'border-transparent text-slate-500 hover:text-slate-900'
-              }`}
-            >
-              <Banknote size={16} /> Disburse New Loan
-            </button>
-
-            <button
-              onClick={() => setActiveTab('REPAYMENT')}
-              className={`flex items-center gap-1.5 px-4 py-2.5 border-b-2 whitespace-nowrap transition-colors ${
-                activeTab === 'REPAYMENT'
-                  ? 'border-amber-800 text-amber-950 bg-amber-50/50 font-extrabold'
-                  : 'border-transparent text-slate-500 hover:text-slate-900'
-              }`}
-            >
-              <Receipt size={16} /> Record Loan Repayment ({activeLoans.length})
-            </button>
-          </>
-        )}
       </div>
 
-      {/* TAB 1: DISBURSED LOANS DIRECTORY */}
-      {activeTab === 'DIRECTORY' && (
+      {/* LEVEL 2: PORTFOLIO SUB-BAR */}
+      {parentTab === 'PORTFOLIO' && (
+        <div className="p-1.5 bg-blue-900/90 text-white rounded-xl flex items-center gap-1.5 text-xs font-bold font-sans w-fit">
+          <button
+            type="button"
+            onClick={() => setPortfolioSubTab('DIRECTORY')}
+            className={`px-3.5 py-1.5 rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer ${
+              portfolioSubTab === 'DIRECTORY'
+                ? 'bg-white text-blue-950 font-extrabold shadow-xs'
+                : 'text-blue-100 hover:bg-blue-800'
+            }`}
+          >
+            <ListFilter size={14} /> Disbursed Loans Directory ({loanList.length})
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setPortfolioSubTab('GROUP_LEDGER')}
+            className={`px-3.5 py-1.5 rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer ${
+              portfolioSubTab === 'GROUP_LEDGER'
+                ? 'bg-white text-blue-950 font-extrabold shadow-xs'
+                : 'text-blue-100 hover:bg-blue-800'
+            }`}
+          >
+            <Users size={14} /> Group Loans Ledger (Lifetime)
+          </button>
+
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={() => setPortfolioSubTab('DISBURSE')}
+              className={`px-3.5 py-1.5 rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer ${
+                portfolioSubTab === 'DISBURSE'
+                  ? 'bg-white text-blue-950 font-extrabold shadow-xs'
+                  : 'text-blue-100 hover:bg-blue-800'
+              }`}
+            >
+              <Banknote size={14} /> Disburse New Loan
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* LEVEL 2: REPAYMENTS SUB-BAR */}
+      {parentTab === 'REPAYMENTS' && (
+        <div className="p-1.5 bg-emerald-950 text-white rounded-xl flex flex-wrap items-center gap-1 text-xs font-bold font-sans">
+          
+          <button
+            type="button"
+            onClick={() => setRepaymentSubTab('HISTORY')}
+            className={`px-3.5 py-1.5 rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer ${
+              repaymentSubTab === 'HISTORY'
+                ? 'bg-white text-emerald-950 font-extrabold shadow-xs'
+                : 'text-emerald-100 hover:bg-emerald-900'
+            }`}
+          >
+            <History size={14} /> Repayment History ({repaymentHistory.length})
+          </button>
+
+          {isAdmin && (
+            <>
+              <button
+                type="button"
+                onClick={() => setRepaymentSubTab('REPAYMENT')}
+                className={`px-3.5 py-1.5 rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer ${
+                  repaymentSubTab === 'REPAYMENT'
+                    ? 'bg-white text-emerald-950 font-extrabold shadow-xs'
+                    : 'text-emerald-100 hover:bg-emerald-900'
+                }`}
+              >
+                <Receipt size={14} /> Standard EMI Repayment ({activeLoans.length})
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setRepaymentSubTab('LATE_FEE_COLLECTION')}
+                className={`px-3.5 py-1.5 rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer ${
+                  repaymentSubTab === 'LATE_FEE_COLLECTION'
+                    ? 'bg-red-800 text-white font-extrabold shadow-xs'
+                    : 'text-red-200 hover:bg-emerald-900'
+                }`}
+              >
+                <ShieldAlert size={14} className="text-amber-400" /> Overdue Fine Collection Terminal
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setRepaymentSubTab('FINE_REPAYMENTS_LEDGER')}
+                className={`px-3.5 py-1.5 rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer ${
+                  repaymentSubTab === 'FINE_REPAYMENTS_LEDGER'
+                    ? 'bg-purple-800 text-white font-extrabold shadow-xs'
+                    : 'text-purple-200 hover:bg-emerald-900'
+                }`}
+              >
+                <Sparkles size={14} className="text-amber-300" /> Fine Vouchers Ledger
+              </button>
+            </>
+          )}
+
+        </div>
+      )}
+
+      {/* PORTFOLIO: DIRECTORY */}
+      {parentTab === 'PORTFOLIO' && portfolioSubTab === 'DIRECTORY' && (
         <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden space-y-0">
           <div className="p-4 border-b border-slate-200 flex flex-col xl:flex-row xl:items-center justify-between gap-3">
-            <span className="font-semibold text-slate-800 text-sm">
-              Group Disbursed Loans ({filteredLoanList.length} of {loanList.length})
-            </span>
+            <div className="flex items-center gap-3">
+              <span className="font-semibold text-slate-800 text-sm">
+                Group Disbursed Loans ({filteredLoanList.length} Total)
+              </span>
+              <div className="flex items-center gap-1 text-xs font-semibold text-slate-500 bg-slate-100 px-2 py-1 rounded-lg">
+                <span>View:</span>
+                <select
+                  value={dirPageSize}
+                  onChange={(e) => {
+                    setDirPageSize(Number(e.target.value));
+                    setDirPage(1);
+                  }}
+                  className="bg-transparent font-mono font-bold text-slate-900 cursor-pointer"
+                >
+                  <option value={5}>5 Per Page</option>
+                  <option value={10}>10 Per Page</option>
+                  <option value={25}>25 Per Page</option>
+                </select>
+              </div>
+            </div>
 
             <div className="flex flex-wrap items-center gap-2 w-full xl:w-auto">
-              {/* Status Filter Toggle */}
               <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-lg border border-slate-200 text-xs font-bold">
                 <Filter size={13} className="text-slate-500 ml-1" />
                 <button
-                  onClick={() => setStatusFilter('ALL')}
-                  className={`px-2 py-1 rounded-md transition-colors ${
-                    statusFilter === 'ALL'
-                      ? 'bg-white text-slate-900 shadow-xs'
-                      : 'text-slate-600 hover:text-slate-900'
+                  type="button"
+                  onClick={() => { setStatusFilter('ALL'); setDirPage(1); }}
+                  className={`px-2 py-1 rounded-md transition-colors cursor-pointer ${
+                    statusFilter === 'ALL' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
                   }`}
                 >
                   All ({enrichedLoanList.length})
                 </button>
                 <button
-                  onClick={() => setStatusFilter('ACTIVE')}
-                  className={`px-2 py-1 rounded-md transition-colors ${
-                    statusFilter === 'ACTIVE'
-                      ? 'bg-amber-800 text-white shadow-xs'
-                      : 'text-slate-600 hover:text-slate-900'
+                  type="button"
+                  onClick={() => { setStatusFilter('ACTIVE'); setDirPage(1); }}
+                  className={`px-2 py-1 rounded-md transition-colors cursor-pointer ${
+                    statusFilter === 'ACTIVE' ? 'bg-amber-800 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900'
                   }`}
                 >
                   Active ({enrichedLoanList.filter((l) => !l.isPaidOff).length})
                 </button>
                 <button
-                  onClick={() => setStatusFilter('PAID_OFF')}
-                  className={`px-2 py-1 rounded-md transition-colors ${
-                    statusFilter === 'PAID_OFF'
-                      ? 'bg-emerald-700 text-white shadow-xs'
-                      : 'text-slate-600 hover:text-slate-900'
+                  type="button"
+                  onClick={() => { setStatusFilter('PAID_OFF'); setDirPage(1); }}
+                  className={`px-2 py-1 rounded-md transition-colors cursor-pointer ${
+                    statusFilter === 'PAID_OFF' ? 'bg-emerald-700 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900'
                   }`}
                 >
                   Paid Off ({enrichedLoanList.filter((l) => l.isPaidOff).length})
                 </button>
               </div>
 
-              {/* Date Filter Controls */}
               <div className="flex items-center gap-1.5 bg-slate-50 p-1 rounded-lg border border-slate-200 text-xs">
                 <Calendar size={13} className="text-slate-500 ml-1" />
                 <input
                   type="date"
                   value={dirStartDate}
-                  onChange={(e) => setDirStartDate(e.target.value)}
+                  onChange={(e) => { setDirStartDate(e.target.value); setDirPage(1); }}
                   className="px-1.5 py-0.5 border border-slate-300 rounded bg-white text-slate-900 text-xs"
-                  title="Issue Date From"
                 />
                 <span className="text-slate-400 font-bold">to</span>
                 <input
                   type="date"
                   value={dirEndDate}
-                  onChange={(e) => setDirEndDate(e.target.value)}
+                  onChange={(e) => { setDirEndDate(e.target.value); setDirPage(1); }}
                   className="px-1.5 py-0.5 border border-slate-300 rounded bg-white text-slate-900 text-xs"
-                  title="Issue Date To"
                 />
                 {(dirStartDate || dirEndDate) && (
                   <button
-                    onClick={() => {
-                      setDirStartDate('');
-                      setDirEndDate('');
-                    }}
-                    className="p-1 text-slate-500 hover:text-red-700"
-                    title="Clear Date Filter"
+                    type="button"
+                    onClick={() => { setDirStartDate(''); setDirEndDate(''); setDirPage(1); }}
+                    className="p-1 text-slate-500 hover:text-red-700 cursor-pointer"
                   >
                     <RotateCcw size={12} />
                   </button>
                 )}
               </div>
 
-              {/* Search Bar */}
               <div className="relative flex-1 sm:w-48">
                 <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                 <input
                   type="text"
                   placeholder={isAdmin ? "Search Loan ID, Name..." : "Search Name..."}
                   value={directorySearch}
-                  onChange={(e) => setDirectorySearch(e.target.value)}
+                  onChange={(e) => { setDirectorySearch(e.target.value); setDirPage(1); }}
                   className="w-full pl-9 pr-3 py-1.5 text-xs border border-slate-300 rounded-lg bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-amber-700"
                 />
               </div>
 
-              {/* Report Printable Modal (Admin Only) */}
               {isAdmin && (
                 <PrintLoansReportModal loanList={filteredLoanList} profiles={profiles} paymentList={paymentList} />
               )}
@@ -294,25 +452,22 @@ export default function LoansTabContainer({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {filteredLoanList.map((loan) => {
+                {paginatedDirectoryLoans.map((loan) => {
                   const isOwnLoan = Boolean(currentUserId) && String(loan.borrower_id) === String(currentUserId);
                   const canAccessDetails = isAdmin || isOwnLoan;
 
                   return (
                     <tr key={loan.id} className={`hover:bg-slate-50 transition-colors ${isOwnLoan ? 'bg-amber-50/20' : ''}`}>
-                      
-                      {/* Loan ID (Masked for others) */}
                       <td className="p-3 font-mono text-xs">
                         {canAccessDetails ? (
                           <span className="font-extrabold text-amber-900">{loan.loan_code || `LN-${loan.id}`}</span>
                         ) : (
-                          <span className="text-slate-400 font-sans text-xs flex items-center gap-1 select-none" title="Loan ID restricted for privacy">
+                          <span className="text-slate-400 font-sans text-xs flex items-center gap-1 select-none">
                             <Lock size={12} className="text-slate-400" /> ••••••
                           </span>
                         )}
                       </td>
 
-                      {/* Borrower Name & Details */}
                       <td className="p-3 font-medium text-slate-900">
                         <div className="flex items-center gap-2">
                           <span>{loan.borrower.full_name}</span>
@@ -359,12 +514,21 @@ export default function LoansTabContainer({
                         </span>
                       </td>
 
-                      {/* Action Column */}
                       <td className="p-3 text-right">
                         {canAccessDetails ? (
                           <div className="flex items-center justify-end gap-1">
                             <LoanDetailsModal loan={loan} />
-                            {isSuperAdmin && <EditLoanModal loan={loan} borrowerName={loan.borrower.full_name} />}
+                            {isSuperAdmin && (
+                              <>
+                                <EditLoanModal loan={loan} borrowerName={loan.borrower.full_name} />
+                                <DeleteLoanConfirmModal
+                                  type="LOAN"
+                                  recordId={loan.id}
+                                  code={loan.loan_code || `LN-${loan.id}`}
+                                  summaryText={`Principal NPR ${Number(loan.principal_amount).toLocaleString('en-IN')} issued to ${loan.borrower.full_name}`}
+                                />
+                              </>
+                            )}
                           </div>
                         ) : (
                           <span className="text-[11px] text-slate-400 font-semibold px-2.5 py-1 bg-slate-100 rounded border border-slate-200 inline-flex items-center gap-1 cursor-not-allowed select-none">
@@ -372,25 +536,64 @@ export default function LoansTabContainer({
                           </span>
                         )}
                       </td>
-
                     </tr>
                   );
                 })}
-                {filteredLoanList.length === 0 && (
-                  <tr>
-                    <td colSpan={8} className="p-6 text-center text-slate-400 text-xs">
-                      No matching disbursed loans found for the selected filters.
-                    </td>
-                  </tr>
-                )}
               </tbody>
             </table>
           </div>
+
+          {totalDirPages > 1 && (
+            <div className="p-3 bg-slate-50 border-t border-slate-200 flex justify-between items-center text-xs font-bold font-mono">
+              <span className="text-slate-600">
+                Page {dirPage} of {totalDirPages} ({filteredLoanList.length} Total Loans)
+              </span>
+              <div className="flex gap-1">
+                <button
+                  type="button"
+                  disabled={dirPage === 1}
+                  onClick={() => setDirPage((p) => Math.max(1, p - 1))}
+                  className="px-3 py-1 bg-white border border-slate-300 text-slate-800 disabled:opacity-40 rounded-lg flex items-center gap-1 cursor-pointer"
+                >
+                  <ChevronLeft size={13} /> Prev
+                </button>
+                <button
+                  type="button"
+                  disabled={dirPage === totalDirPages}
+                  onClick={() => setDirPage((p) => Math.min(totalDirPages, p + 1))}
+                  className="px-3 py-1 bg-white border border-slate-300 text-slate-800 disabled:opacity-40 rounded-lg flex items-center gap-1 cursor-pointer"
+                >
+                  Next <ChevronRight size={13} />
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
-      {/* TAB 2: REPAYMENT HISTORY */}
-      {activeTab === 'HISTORY' && (
+      {/* PORTFOLIO: GROUP LOANS LEDGER */}
+      {parentTab === 'PORTFOLIO' && portfolioSubTab === 'GROUP_LEDGER' && (
+        <GroupLoansLedgerTable
+          loanList={loanList}
+          paymentList={paymentList}
+          profiles={profiles}
+          fineRules={fineRules}
+        />
+      )}
+
+      {/* PORTFOLIO: DISBURSE NEW LOAN */}
+      {parentTab === 'PORTFOLIO' && portfolioSubTab === 'DISBURSE' && isAdmin && (
+        <div className="max-w-2xl">
+          <IssueLoanForm
+            profiles={profiles}
+            activeLoans={activeLoans}
+            currentAdmin={currentAdmin}
+          />
+        </div>
+      )}
+
+      {/* REPAYMENTS: HISTORY */}
+      {parentTab === 'REPAYMENTS' && repaymentSubTab === 'HISTORY' && (
         <div className="space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-xl">
@@ -409,56 +612,56 @@ export default function LoansTabContainer({
 
           <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
             <div className="p-4 border-b border-slate-200 flex flex-col xl:flex-row xl:items-center justify-between gap-3">
-              <span className="font-semibold text-slate-800 text-sm">
-                Repayment Logs ({filteredRepaymentHistory.length} of {repaymentHistory.length})
-              </span>
+              <div className="flex items-center gap-3">
+                <span className="font-semibold text-slate-800 text-sm">
+                  Repayment Logs ({filteredRepaymentHistory.length} Total)
+                </span>
+                <div className="flex items-center gap-1 text-xs font-semibold text-slate-500 bg-slate-100 px-2 py-1 rounded-lg">
+                  <span>View:</span>
+                  <select
+                    value={histPageSize}
+                    onChange={(e) => {
+                      setHistPageSize(Number(e.target.value));
+                      setHistPage(1);
+                    }}
+                    className="bg-transparent font-mono font-bold text-slate-900 cursor-pointer"
+                  >
+                    <option value={5}>5 Per Page</option>
+                    <option value={10}>10 Per Page</option>
+                    <option value={25}>25 Per Page</option>
+                  </select>
+                </div>
+              </div>
 
               <div className="flex flex-wrap items-center gap-2 w-full xl:w-auto">
-                {/* Date Filter Controls */}
                 <div className="flex items-center gap-1.5 bg-slate-50 p-1 rounded-lg border border-slate-200 text-xs">
                   <Calendar size={13} className="text-slate-500 ml-1" />
                   <input
                     type="date"
                     value={histStartDate}
-                    onChange={(e) => setHistStartDate(e.target.value)}
+                    onChange={(e) => { setHistStartDate(e.target.value); setHistPage(1); }}
                     className="px-1.5 py-0.5 border border-slate-300 rounded bg-white text-slate-900 text-xs"
-                    title="Payment Date From"
                   />
                   <span className="text-slate-400 font-bold">to</span>
                   <input
                     type="date"
                     value={histEndDate}
-                    onChange={(e) => setHistEndDate(e.target.value)}
+                    onChange={(e) => { setHistEndDate(e.target.value); setHistPage(1); }}
                     className="px-1.5 py-0.5 border border-slate-300 rounded bg-white text-slate-900 text-xs"
-                    title="Payment Date To"
                   />
-                  {(histStartDate || histEndDate) && (
-                    <button
-                      onClick={() => {
-                        setHistStartDate('');
-                        setHistEndDate('');
-                      }}
-                      className="p-1 text-slate-500 hover:text-red-700"
-                      title="Clear Date Filter"
-                    >
-                      <RotateCcw size={12} />
-                    </button>
-                  )}
                 </div>
 
-                {/* Search Bar */}
                 <div className="relative flex-1 sm:w-56">
                   <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                   <input
                     type="text"
                     placeholder={isAdmin ? "Search Payment ID, Loan ID, Name..." : "Search Name..."}
                     value={historySearch}
-                    onChange={(e) => setHistorySearch(e.target.value)}
+                    onChange={(e) => { setHistorySearch(e.target.value); setHistPage(1); }}
                     className="w-full pl-9 pr-3 py-1.5 text-xs border border-slate-300 rounded-lg bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-amber-700"
                   />
                 </div>
 
-                {/* Report Printable Modal (Admin Only) */}
                 {isAdmin && <PrintRepaymentsReportModal repaymentHistory={filteredRepaymentHistory} />}
               </div>
             </div>
@@ -476,14 +679,18 @@ export default function LoansTabContainer({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {filteredRepaymentHistory.map((record) => {
+                  {paginatedRepayments.map((record) => {
                     const isOwnRecord = Boolean(currentUserId) && String(record.borrower_id) === String(currentUserId);
                     const canAccessDetails = isAdmin || isOwnRecord;
 
+                    // Check if payment is an Overdue Fine Settlement Voucher
+                    const isOverdueSettlement = Number(record.fine_paid || 0) > 0 || 
+                                                 Number(record.fine_discount_amount || 0) > 0 || 
+                                                 Number(record.interest_waived || 0) > 0 ||
+                                                 Boolean(record.fine_waived);
+
                     return (
                       <tr key={record.id} className={`hover:bg-slate-50 transition-colors ${isOwnRecord ? 'bg-amber-50/20' : ''}`}>
-                        
-                        {/* Payment ID (Masked for others) */}
                         <td className="p-3 text-xs font-mono">
                           {canAccessDetails ? (
                             <>
@@ -498,7 +705,6 @@ export default function LoansTabContainer({
                           )}
                         </td>
 
-                        {/* Borrower Name */}
                         <td className="p-3 font-medium text-slate-900">
                           <div className="flex items-center gap-2">
                             <span>{record.borrower_name}</span>
@@ -523,12 +729,45 @@ export default function LoansTabContainer({
                           NPR {Number(record.total_paid || 0).toLocaleString('en-IN')}
                         </td>
 
-                        {/* Receipt Button Column */}
+                        {/* ACTIONS COLUMN: SEPARATED LOGIC FOR OVERDUE SETTLEMENT VS STANDARD REPAYMENT */}
                         <td className="p-3 text-right">
                           {canAccessDetails ? (
-                            <div className="flex items-center justify-end gap-1">
-                              {isSuperAdmin && <EditPaymentModal record={record} />}
-                              <RepaymentReceiptModal receipt={record} />
+                            <div className="flex items-center justify-end gap-1.5 font-sans">
+                              {isOverdueSettlement ? (
+                                <>
+                                  {/* Print Fine Voucher Receipt with profiles lookup */}
+                                  <RepaymentReceiptModal receipt={record} profiles={profiles} />
+
+                                  {/* Direct Badge to Fine Ledger for Audited Management */}
+                                  {isAdmin && (
+                                    <button
+                                      type="button"
+                                      onClick={() => setRepaymentSubTab('FINE_REPAYMENTS_LEDGER')}
+                                      className="px-2.5 py-1 bg-amber-100 hover:bg-amber-200 text-amber-950 border border-amber-300 rounded-lg text-[10px] font-extrabold inline-flex items-center gap-1 cursor-pointer transition-colors shadow-xs"
+                                      title="Fine vouchers must be managed & deleted in the Fine Repayments Ledger"
+                                    >
+                                      <span>Manage in Fine Ledger</span>
+                                      <ArrowRight size={11} />
+                                    </button>
+                                  )}
+                                </>
+                              ) : (
+                                <>
+                                  {/* Standard EMI Repayment Modal Options */}
+                                  {isSuperAdmin && (
+                                    <>
+                                      <EditPaymentModal record={record} />
+                                      <DeleteLoanConfirmModal
+                                        type="REPAYMENT"
+                                        recordId={record.id}
+                                        code={record.payment_code || `PY-${record.id}`}
+                                        summaryText={`Repayment NPR ${(Number(record.principal_paid || 0) + Number(record.interest_paid || 0)).toLocaleString('en-IN')} on ${record.payment_date}`}
+                                      />
+                                    </>
+                                  )}
+                                  <RepaymentReceiptModal receipt={record} profiles={profiles} />
+                                </>
+                              )}
                             </div>
                           ) : (
                             <span className="text-[11px] text-slate-400 font-semibold px-2.5 py-1 bg-slate-100 rounded border border-slate-200 inline-flex items-center gap-1 cursor-not-allowed select-none">
@@ -536,42 +775,79 @@ export default function LoansTabContainer({
                             </span>
                           )}
                         </td>
-
                       </tr>
                     );
                   })}
-
-                  {filteredRepaymentHistory.length === 0 && (
-                    <tr>
-                      <td colSpan={6} className="p-6 text-center text-slate-400 text-xs">
-                        No matching repayment records found for the selected query or filters.
-                      </td>
-                    </tr>
-                  )}
                 </tbody>
               </table>
             </div>
+
+            {totalHistPages > 1 && (
+              <div className="p-3 bg-slate-50 border-t border-slate-200 flex justify-between items-center text-xs font-bold font-mono">
+                <span className="text-slate-600">
+                  Page {histPage} of {totalHistPages} ({filteredRepaymentHistory.length} Total Repayments)
+                </span>
+                <div className="flex gap-1">
+                  <button
+                    type="button"
+                    disabled={histPage === 1}
+                    onClick={() => setHistPage((p) => Math.max(1, p - 1))}
+                    className="px-3 py-1 bg-white border border-slate-300 text-slate-800 disabled:opacity-40 rounded-lg flex items-center gap-1 cursor-pointer"
+                  >
+                    <ChevronLeft size={13} /> Prev
+                  </button>
+                  <button
+                    type="button"
+                    disabled={histPage === totalHistPages}
+                    onClick={() => setHistPage((p) => Math.min(totalHistPages, p + 1))}
+                    className="px-3 py-1 bg-white border border-slate-300 text-slate-800 disabled:opacity-40 rounded-lg flex items-center gap-1 cursor-pointer"
+                  >
+                    Next <ChevronRight size={13} />
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
 
-      {/* TAB 3: DISBURSE NEW LOAN */}
-      {activeTab === 'DISBURSE' && isAdmin && (
+      {/* REPAYMENTS: STANDARD EMI REPAYMENT */}
+      {parentTab === 'REPAYMENTS' && repaymentSubTab === 'REPAYMENT' && isAdmin && (
         <div className="max-w-2xl">
-          <IssueLoanForm
+          <RecordRepaymentForm 
+            activeLoans={activeLoans} 
             profiles={profiles}
-            activeLoans={activeLoans}
-            currentAdmin={currentAdmin}
+            paymentList={paymentList}
+            fineRules={fineRules}
+            preSelectedLoanId={selectedLoanIdForRepayment}
+            onNavigateToLateFeeTerminal={(loanId) => {
+              setRepaymentSubTab('LATE_FEE_COLLECTION');
+            }}
           />
         </div>
       )}
 
-      {/* TAB 4: RECORD LOAN REPAYMENT */}
-      {activeTab === 'REPAYMENT' && isAdmin && (
-        <div className="max-w-2xl">
-          <RecordRepaymentForm activeLoans={activeLoans} />
-        </div>
+      {/* REPAYMENTS: OVERDUE FINE COLLECTION TERMINAL */}
+      {parentTab === 'REPAYMENTS' && repaymentSubTab === 'LATE_FEE_COLLECTION' && isAdmin && (
+        <LoanLateFeeCollectionTab
+          activeLoans={activeLoans}
+          profiles={profiles}
+          paymentList={paymentList}
+          fineRules={fineRules}
+        />
       )}
+
+      {/* REPAYMENTS: FINE REPAYMENTS VOUCHERS LEDGER */}
+      {parentTab === 'REPAYMENTS' && repaymentSubTab === 'FINE_REPAYMENTS_LEDGER' && isAdmin && (
+        <FineRepaymentsLedgerTable
+          paymentList={paymentList}
+          loanList={loanList}
+          activeLoans={activeLoans}
+          profiles={profiles}
+          isSuperAdmin={isSuperAdmin}
+        />
+      )}
+
     </div>
   );
 }

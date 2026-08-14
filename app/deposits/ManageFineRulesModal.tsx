@@ -203,7 +203,7 @@ export default function ManageFineRulesModal({
         onClick={() => setIsOpen(true)}
         className="w-full sm:w-auto px-3 py-2 bg-amber-900 hover:bg-amber-800 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-xs"
       >
-        <Settings size={14} /> Manage Late Fines & Penalties
+        <Settings size={14} /> Configure Late Fines & Penalties
       </button>
 
       {/* MAIN MODAL */}
